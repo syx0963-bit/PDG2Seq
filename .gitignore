@@ -34,3 +34,5 @@ experiments/
 .vscode/
 *.swp
 *.swo
+
+model/__pycache__
