@@ -31,9 +31,16 @@ class Trainer(object):
         #log
         if os.path.isdir(args.log_dir) == False and not args.debug:
             os.makedirs(args.log_dir, exist_ok=True)
-        self.logger = get_logger(args.log_dir, name=args.model, debug=args.debug)
+        self.logger = get_logger(
+            args.log_dir,
+            name=args.model,
+            debug=args.debug,
+            log_file=getattr(args, 'root_log_file', None)
+        )
         self.logger.info(args)
         self.logger.info('Experiment log path in: {}'.format(args.log_dir))
+        if hasattr(args, 'root_log_file'):
+            self.logger.info('Persistent epoch log path in: {}'.format(args.root_log_file))
         self.batches_seen = 0
         self.meminfo = 0
         #if not args.debug:
@@ -44,6 +51,8 @@ class Trainer(object):
     def val_epoch(self, epoch, val_dataloader):
         self.model.eval()
         total_val_loss = 0
+        y_pred = []
+        y_true = []
         epoch_time = time.time()
         with torch.no_grad():
             for batch_idx, (data, target) in enumerate(val_dataloader):
@@ -58,13 +67,21 @@ class Trainer(object):
                 #a whole batch of Metr_LA is filtered
                 if not torch.isnan(loss):
                     total_val_loss += loss.item()
+                y_true.append(label)
+                y_pred.append(output)
         val_loss = total_val_loss / len(val_dataloader)
-        self.logger.info('***********Val Epoch {}: average Loss: {:.6f}, train time: {:.2f} s'.format(epoch, val_loss, time.time() - epoch_time))
-        return val_loss
+        mae, rmse, mape, _, corr = All_Metrics(torch.cat(y_pred, dim=0), torch.cat(y_true, dim=0),
+                                               self.args.mae_thresh, self.args.mape_thresh)
+        metrics = self._build_epoch_metrics(val_loss, mae, rmse, mape, corr, time.time() - epoch_time)
+        self.logger.info('***********Val Epoch {}: average Loss: {:.6f}, MAE: {:.4f}, RMSE: {:.4f}, MAPE: {:.4f}%, CORR: {:.4f}, train time: {:.2f} s'.format(
+            epoch, metrics['loss'], metrics['mae'], metrics['rmse'], metrics['mape'] * 100, metrics['corr'], metrics['time']))
+        return metrics
 
     def test_epoch(self, epoch, test_dataloader):
         self.model.eval()
         total_test_loss = 0
+        y_pred = []
+        y_true = []
         epoch_time = time.time()
         with torch.no_grad():
             for batch_idx, (data, target) in enumerate(test_dataloader):
@@ -79,9 +96,15 @@ class Trainer(object):
                 #a whole batch of Metr_LA is filtered
                 if not torch.isnan(loss):
                     total_test_loss += loss.item()
+                y_true.append(label)
+                y_pred.append(output)
         test_loss = total_test_loss / len(test_dataloader)
-        self.logger.info('**********test Epoch {}: average Loss: {:.6f}, train time: {:.2f} s'.format(epoch, test_loss, time.time() - epoch_time))
-        return test_loss
+        mae, rmse, mape, _, corr = All_Metrics(torch.cat(y_pred, dim=0), torch.cat(y_true, dim=0),
+                                               self.args.mae_thresh, self.args.mape_thresh)
+        metrics = self._build_epoch_metrics(test_loss, mae, rmse, mape, corr, time.time() - epoch_time)
+        self.logger.info('**********Test Epoch {}: average Loss: {:.6f}, MAE: {:.4f}, RMSE: {:.4f}, MAPE: {:.4f}%, CORR: {:.4f}, train time: {:.2f} s'.format(
+            epoch, metrics['loss'], metrics['mae'], metrics['rmse'], metrics['mape'] * 100, metrics['corr'], metrics['time']))
+        return metrics
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -156,11 +179,13 @@ class Trainer(object):
                 val_dataloader = self.val_loader
             test_dataloader = self.test_loader
 
-            val_epoch_loss = self.val_epoch(epoch, val_dataloader)
+            val_metrics = self.val_epoch(epoch, val_dataloader)
+            val_epoch_loss = val_metrics['loss']
             vaild_loss.append(val_epoch_loss)
 
             # epoch_time = time.time()
-            test_epoch_loss = self.test_epoch(epoch, test_dataloader)
+            test_metrics = self.test_epoch(epoch, test_dataloader)
+            test_epoch_loss = test_metrics['loss']
             # self.logger.info("train time: {:.2f} s".format(time.time()-epoch_time))
             #print('LR:', self.optimizer.param_groups[0]['lr'])
             if train_epoch_loss > 1e6:
@@ -189,6 +214,9 @@ class Trainer(object):
             if test_epoch_loss< best_test_loss:
                 best_test_loss = test_epoch_loss
                 best_test_model = copy.deepcopy(self.model.state_dict())
+
+            self._log_epoch_progress(epoch, train_epoch_loss, val_metrics, test_metrics,
+                                     best_loss, best_test_loss, not_improved_count)
 
 
         # training_time = time.time() - start_time
@@ -219,6 +247,39 @@ class Trainer(object):
         }
         torch.save(state, self.best_path)
         self.logger.info("Saving current best model to " + self.best_path)
+
+    @staticmethod
+    def _to_float(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().item()
+        return float(value)
+
+    def _build_epoch_metrics(self, loss, mae, rmse, mape, corr, elapsed_time):
+        return {
+            'loss': self._to_float(loss),
+            'mae': self._to_float(mae),
+            'rmse': self._to_float(rmse),
+            'mape': self._to_float(mape),
+            'corr': self._to_float(corr),
+            'time': self._to_float(elapsed_time)
+        }
+
+    def _log_epoch_progress(self, epoch, train_loss, val_metrics, test_metrics,
+                            best_val_loss, best_test_loss, not_improved_count):
+        current_lr = self.optimizer.param_groups[0]['lr']
+        self.logger.info(
+            'Epoch Progress {}/{} | lr: {:.8f} | train_loss: {:.6f} | '
+            'val_loss: {:.6f}, val_MAE: {:.4f}, val_RMSE: {:.4f}, val_MAPE: {:.4f}%, val_CORR: {:.4f} | '
+            'test_loss: {:.6f}, test_MAE: {:.4f}, test_RMSE: {:.4f}, test_MAPE: {:.4f}%, test_CORR: {:.4f} | '
+            'best_val_loss: {:.6f}, best_test_loss: {:.6f}, no_improve_epochs: {}'.format(
+                epoch, self.args.epochs, current_lr, train_loss,
+                val_metrics['loss'], val_metrics['mae'], val_metrics['rmse'],
+                val_metrics['mape'] * 100, val_metrics['corr'],
+                test_metrics['loss'], test_metrics['mae'], test_metrics['rmse'],
+                test_metrics['mape'] * 100, test_metrics['corr'],
+                best_val_loss, best_test_loss, not_improved_count
+            )
+        )
 
     @staticmethod
     def test(model, args, data_loader, scaler, logger, path=None):

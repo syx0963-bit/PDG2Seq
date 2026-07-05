@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 
-def get_logger(root, name=None, debug=True):
+def get_logger(root, name=None, debug=True, log_file=None):
     #when debug is true, show DEBUG and INFO in screen
     #when debug is false, show DEBUG in file and info in both screen&file
     #INFO will always be in screen
@@ -10,6 +10,12 @@ def get_logger(root, name=None, debug=True):
     logger = logging.getLogger(name)
     #critical > error > warning > info > debug > notset
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    if logger.handlers:
+        for handler in logger.handlers:
+            handler.close()
+        logger.handlers = []
 
     # define the formate
     formatter = logging.Formatter('%(asctime)s: %(message)s', "%Y-%m-%d %H:%M")
@@ -19,16 +25,18 @@ def get_logger(root, name=None, debug=True):
         console_handler.setLevel(logging.DEBUG)
     else:
         console_handler.setLevel(logging.INFO)
-        # create a handler for write log to file
-        logfile = os.path.join(root, 'run.log')
-        print('Creat Log File in: ', logfile)
-        file_handler = logging.FileHandler(logfile, mode='w')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
     # add Handler to logger
     logger.addHandler(console_handler)
-    if not debug:
+
+    if log_file is None and not debug:
+        log_file = os.path.join(root, 'run.log')
+    if log_file is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+        print('Create Log File in: ', log_file)
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     return logger
 

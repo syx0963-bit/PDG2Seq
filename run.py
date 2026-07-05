@@ -10,6 +10,8 @@ import torch.nn as nn
 import argparse
 import configparser
 import time
+import re
+import subprocess
 from datetime import datetime
 from model.PDG2Seq import PDG2Seq as Network
 from model.BasicTrainer import Trainer
@@ -99,6 +101,7 @@ args.add_argument('--mae_thresh', default=config['test']['mae_thresh'], type=eva
 args.add_argument('--mape_thresh', default=config['test']['mape_thresh'], type=float)
 #log
 args.add_argument('--log_dir', default='./', type=str)
+args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=eval)
 args = args.parse_args()
@@ -155,6 +158,21 @@ current_time = datetime.now().strftime('%Y%m%d%H%M%S')
 current_dir = os.path.dirname(os.path.realpath(__file__))
 log_dir = os.path.join(current_dir,'experiments', args.dataset, current_time)
 args.log_dir = log_dir
+
+def get_current_git_branch():
+    try:
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=current_dir,
+            stderr=subprocess.DEVNULL
+        ).decode('utf-8').strip()
+    except Exception:
+        branch = 'unknown_branch'
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', branch)
+
+root_log_dir = os.path.join(current_dir, args.root_log_dir)
+root_log_name = '{}_{}.log'.format(get_current_git_branch(), current_time)
+args.root_log_file = os.path.join(root_log_dir, root_log_name)
 
 #start training
 trainer = Trainer(model, loss, optimizer, train_loader, val_loader, test_loader, scaler,
