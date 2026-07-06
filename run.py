@@ -23,6 +23,25 @@ warnings.filterwarnings('ignore')
 
 
 #*************************************************************************#
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in ('true', '1', 'yes', 'y', 't'):
+        return True
+    if value in ('false', '0', 'no', 'n', 'f'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
+def optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, (float, int)):
+        return float(value)
+    if str(value).lower() == 'none':
+        return None
+    return float(value)
 
 from lib.metrics import MAE_torch
 def masked_mae_loss(scaler, mask_value):
@@ -45,9 +64,9 @@ args = argparse.ArgumentParser(description='arguments')
 args.add_argument('--dataset', default='PEMSD4', type=str)  #PEMSD4
 args.add_argument('--mode', default='train', type=str)
 args.add_argument('--device', default='cuda:0', type=str, help='indices of GPUs')
-args.add_argument('--debug', default='False', type=eval)
+args.add_argument('--debug', default=False, type=str_to_bool)
 args.add_argument('--model', default='PDG2Seq', type=str)
-args.add_argument('--cuda', default=True, type=bool)
+args.add_argument('--cuda', default=True, type=str_to_bool)
 args1 = args.parse_args()
 
 #get configuration
@@ -63,10 +82,10 @@ args.add_argument('--test_ratio', default=config['data']['test_ratio'], type=flo
 args.add_argument('--lag', default=config['data']['lag'], type=int)
 args.add_argument('--horizon', default=config['data']['horizon'], type=int)
 args.add_argument('--num_nodes', default=config['data']['num_nodes'], type=int)
-args.add_argument('--tod', default=config['data']['tod'], type=eval)
+args.add_argument('--tod', default=config['data']['tod'], type=str_to_bool)
 args.add_argument('--normalizer', default=config['data']['normalizer'], type=str)
-args.add_argument('--column_wise', default=config['data']['column_wise'], type=eval)
-args.add_argument('--default_graph', default=config['data']['default_graph'], type=eval)
+args.add_argument('--column_wise', default=config['data']['column_wise'], type=str_to_bool)
+args.add_argument('--default_graph', default=config['data']['default_graph'], type=str_to_bool)
 args.add_argument('--steps_per_day', default=config['data']['steps_per_day'], type=int)
 args.add_argument('--steps_per_week', default=config['data']['steps_per_week'], type=int)
 #model
@@ -77,8 +96,18 @@ args.add_argument('--embed_dim', default=config['model']['embed_dim'], type=int)
 args.add_argument('--rnn_units', default=config['model']['rnn_units'], type=int)
 args.add_argument('--num_layers', default=config['model']['num_layers'], type=int)
 args.add_argument('--cheb_k', default=config['model']['cheb_order'], type=int)
-args.add_argument('--use_day', default=config['model']['use_day'], type=eval)
-args.add_argument('--use_week', default=config['model']['use_week'], type=eval)
+args.add_argument('--use_day', default=config['model']['use_day'], type=str_to_bool)
+args.add_argument('--use_week', default=config['model']['use_week'], type=str_to_bool)
+args.add_argument('--use_dgq', default=False, type=str_to_bool)
+args.add_argument('--dgq_alpha', default=0.1, type=float)
+args.add_argument('--dgq_dim', default=16, type=int)
+args.add_argument('--use_periodic_context', default=False, type=str_to_bool)
+args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
+args.add_argument('--context_graph_lambda', default=0.05, type=float)
+args.add_argument('--context_graph_dim', default=16, type=int)
+args.add_argument('--periodic_day_steps', default=288, type=int)
+args.add_argument('--periodic_week_steps', default=2016, type=int)
+args.add_argument('--context_temperature', default=1.0, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--seed', default=config['train']['seed'], type=int)
@@ -86,29 +115,29 @@ args.add_argument('--batch_size', default=config['train']['batch_size'], type=in
 args.add_argument('--epochs', default=config['train']['epochs'], type=int)
 args.add_argument('--lr_init', default=config['train']['lr_init'], type=float)
 args.add_argument('--weight_decay', default=config['train']['weight_decay'], type=float)
-args.add_argument('--lr_decay', default=config['train']['lr_decay'], type=eval)
+args.add_argument('--lr_decay', default=config['train']['lr_decay'], type=str_to_bool)
 args.add_argument('--lr_decay_rate', default=config['train']['lr_decay_rate'], type=float)
 args.add_argument('--lr_decay_step', default=config['train']['lr_decay_step'], type=float)
 args.add_argument('--lr_decay_step1', default=config['train']['lr_decay_step1'], type=str)
-args.add_argument('--early_stop', default=config['train']['early_stop'], type=eval)
+args.add_argument('--early_stop', default=config['train']['early_stop'], type=str_to_bool)
 args.add_argument('--early_stop_patience', default=config['train']['early_stop_patience'], type=int)
-args.add_argument('--grad_norm', default=config['train']['grad_norm'], type=eval)
+args.add_argument('--grad_norm', default=config['train']['grad_norm'], type=str_to_bool)
 args.add_argument('--max_grad_norm', default=config['train']['max_grad_norm'], type=int)
-args.add_argument('--teacher_forcing', default=False, type=bool)
-args.add_argument('--real_value', default=config['train']['real_value'], type=eval, help = 'use real value for loss calculation')
+args.add_argument('--teacher_forcing', default=False, type=str_to_bool)
+args.add_argument('--real_value', default=config['train']['real_value'], type=str_to_bool, help = 'use real value for loss calculation')
 #test
-args.add_argument('--mae_thresh', default=config['test']['mae_thresh'], type=eval)
+args.add_argument('--mae_thresh', default=config['test']['mae_thresh'], type=optional_float)
 args.add_argument('--mape_thresh', default=config['test']['mape_thresh'], type=float)
 #log
 args.add_argument('--log_dir', default='./', type=str)
 args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
-args.add_argument('--plot', default=config['log']['plot'], type=eval)
+args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
 
 print(args)
 
-# init_seed(args.seed)
+init_seed(args.seed)
 if torch.cuda.is_available():
     torch.cuda.set_device(int(args.device[5]))
 else:

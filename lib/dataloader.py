@@ -5,6 +5,7 @@ from lib.add_window import Add_Window_Horizon
 from lib.load_dataset import load_st_dataset
 from lib.normalization import NScaler, MinMax01Scaler, MinMax11Scaler, StandardScaler, ColumnMinMaxScaler
 import os
+
 def normalize_dataset(data, normalizer, column_wise=False):
     if normalizer == 'max01':
         if column_wise:
@@ -73,71 +74,122 @@ def split_data_by_ratio(data, val_ratio, test_ratio):
     train_data = data[:-int(data_len*(test_ratio+val_ratio))]
     return train_data, val_data, test_data
 
-def data_loader(X, Y, batch_size, shuffle=True, drop_last=True):
+def _build_periodic_context(raw_norm, start_indices, window, args):
+    periodic_context = np.zeros((len(start_indices), window, raw_norm.shape[1], raw_norm.shape[2]), dtype=np.float32)
+    context_valid = np.zeros((len(start_indices), window, raw_norm.shape[1], 1), dtype=np.float32)
+    temperature = max(float(args.context_temperature), 1.0e-6)
+
+    def cosine_similarity(cur_seq, ref_seq):
+        cur_flat = np.transpose(cur_seq, (1, 0, 2)).reshape(cur_seq.shape[1], -1)
+        ref_flat = np.transpose(ref_seq, (1, 0, 2)).reshape(ref_seq.shape[1], -1)
+        numerator = np.sum(cur_flat * ref_flat, axis=-1)
+        denominator = np.linalg.norm(cur_flat, axis=-1) * np.linalg.norm(ref_flat, axis=-1)
+        return numerator / np.clip(denominator, 1.0e-8, None)
+
+    for sample_idx, start_idx in enumerate(start_indices):
+        current = raw_norm[start_idx:start_idx + window]
+        candidates = []
+        scores = []
+
+        if start_idx >= args.periodic_day_steps:
+            day_seq = raw_norm[start_idx - args.periodic_day_steps:start_idx - args.periodic_day_steps + window]
+            candidates.append(day_seq)
+            scores.append(cosine_similarity(current, day_seq))
+
+        if start_idx >= args.periodic_week_steps:
+            week_seq = raw_norm[start_idx - args.periodic_week_steps:start_idx - args.periodic_week_steps + window]
+            candidates.append(week_seq)
+            scores.append(cosine_similarity(current, week_seq))
+
+        if not candidates:
+            continue
+
+        context_valid[sample_idx] = 1.0
+        if len(candidates) == 1:
+            periodic_context[sample_idx] = candidates[0]
+            continue
+
+        score_stack = np.stack(scores, axis=-1) / temperature
+        score_stack = score_stack - np.max(score_stack, axis=-1, keepdims=True)
+        weights = np.exp(score_stack)
+        weights = weights / np.clip(np.sum(weights, axis=-1, keepdims=True), 1.0e-8, None)
+
+        fused = np.zeros_like(candidates[0], dtype=np.float32)
+        for candidate_idx, candidate in enumerate(candidates):
+            fused += candidate * weights[:, candidate_idx][None, :, None]
+        periodic_context[sample_idx] = fused
+
+    return periodic_context, context_valid
+
+
+def data_loader(X, Y, batch_size, shuffle=True, drop_last=True, seed=None):
     cuda = True if torch.cuda.is_available() else False
     TensorFloat = torch.cuda.FloatTensor if cuda else torch.FloatTensor
     X, Y = TensorFloat(X), TensorFloat(Y)
     data = torch.utils.data.TensorDataset(X, Y)
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
     dataloader = torch.utils.data.DataLoader(data, batch_size=batch_size,
-                                             shuffle=shuffle, drop_last=drop_last)
+                                             shuffle=shuffle, drop_last=drop_last,
+                                             generator=generator)
     return dataloader
 
 
 def get_dataloader(args, normalizer = 'std', tod=False, dow=False, weather=False, single=True):
     #load raw st dataset
-    data = load_st_dataset(args.dataset)        # B, N, D
+    data = load_st_dataset(args.dataset).astype(np.float32)        # B, N, D
 
     L, N, F = data.shape
-
-    # feature_list = [data]
 
     t = args.steps_per_day
     # numerical time_in_day
     time_ind    = [i%t / t for i in range(data.shape[0])]
     time_ind    = np.array(time_ind)
     time_in_day = np.tile(time_ind, [1, N, 1]).transpose((2, 1, 0))
-    # feature_list.append(time_in_day)
-
     # numerical day_in_week
     day_in_week = [(i // t)%args.steps_per_week for i in range(data.shape[0])]
     day_in_week = np.array(day_in_week)
     day_in_week = np.tile(day_in_week, [1, N, 1]).transpose((2, 1, 0))
-    # feature_list.append(day_in_week)
-
-    # data = np.concatenate(feature_list, axis=-1)
-    x, y = Add_Window_Horizon(data, args.lag, args.horizon, single)
-    x_day, y_day = Add_Window_Horizon(time_in_day, args.lag, args.horizon, single)
-    x_week, y_week = Add_Window_Horizon(day_in_week, args.lag, args.horizon, single)
-    x, y = np.concatenate([x,x_day,x_week], axis=-1), np.concatenate([y,y_day,y_week], axis=-1)
+    end_index = L - args.horizon - args.lag + 1
+    start_indices = np.arange(end_index)
 
     #spilit dataset by days or by ratio
     if args.test_ratio > 1:
-        x_train, x_val, x_test = split_data_by_days(x, args.val_ratio, args.test_ratio)
-        y_train, y_val, y_test = split_data_by_days(y, args.val_ratio, args.test_ratio)
-        # day_train, day_val, day_test = split_data_by_days(time_in_day, args.val_ratio, args.test_ratio)
-        # week_train, week_val, week_test = split_data_by_days(day_in_week, args.val_ratio, args.test_ratio)
+        train_starts, val_starts, test_starts = split_data_by_days(start_indices, args.val_ratio, args.test_ratio)
     else:
-        x_train, x_val, x_test = split_data_by_ratio(x, args.val_ratio, args.test_ratio)
-        y_train, y_val, y_test = split_data_by_ratio(y, args.val_ratio, args.test_ratio)
-        # week_train, week_val, week_test = split_data_by_ratio(day_in_week, args.val_ratio, args.test_ratio)
+        train_starts, val_starts, test_starts = split_data_by_ratio(start_indices, args.val_ratio, args.test_ratio)
 
-    scaler = normalize_dataset(x_train[...,:args.input_dim], normalizer, args.column_wise)
+    train_raw_end = int(train_starts[-1] + args.lag) if len(train_starts) > 0 else L
+    scaler = normalize_dataset(data[:train_raw_end, ..., :args.input_dim], normalizer, args.column_wise)
+    raw_norm = scaler.transform(data[..., :args.input_dim]).astype(np.float32)
 
-    x_train[...,:args.input_dim] = scaler.transform(x_train[...,:args.input_dim])
-    x_val[...,:args.input_dim] = scaler.transform(x_val[...,:args.input_dim])
-    x_test[...,:args.input_dim] = scaler.transform(x_test[...,:args.input_dim])
+    x_traffic, y_traffic = Add_Window_Horizon(raw_norm, args.lag, args.horizon, single)
+    x_day, y_day = Add_Window_Horizon(time_in_day.astype(np.float32), args.lag, args.horizon, single)
+    x_week, y_week = Add_Window_Horizon(day_in_week.astype(np.float32), args.lag, args.horizon, single)
+
+    if args.use_periodic_context and args.use_context_graph_refine:
+        periodic_context, context_valid = _build_periodic_context(raw_norm, start_indices, args.lag, args)
+        x = np.concatenate([x_traffic, periodic_context, context_valid, x_day, x_week], axis=-1)
+    else:
+        x = np.concatenate([x_traffic, x_day, x_week], axis=-1)
+    y = np.concatenate([y_traffic, y_day, y_week], axis=-1)
+
+    x_train, x_val, x_test = x[train_starts], x[val_starts], x[test_starts]
+    y_train, y_val, y_test = y[train_starts], y[val_starts], y[test_starts]
 
     print('Train: ', x_train.shape, y_train.shape)
     print('Val: ', x_val.shape, y_val.shape)
     print('Test: ', x_test.shape, y_test.shape)
 
     ##############get dataloader######################
-    train_dataloader = data_loader(x_train, y_train, args.batch_size, shuffle=True, drop_last=True)
+    train_dataloader = data_loader(x_train, y_train, args.batch_size, shuffle=True, drop_last=True, seed=args.seed)
     if len(x_val[...,0]) == 0:
         val_dataloader = None
     else:
-        val_dataloader = data_loader(x_val, y_val, args.batch_size, shuffle=False, drop_last=True)
-    test_dataloader = data_loader(x_test, y_test, args.batch_size, shuffle=False, drop_last=False)
+        val_dataloader = data_loader(x_val, y_val, args.batch_size, shuffle=False, drop_last=True, seed=args.seed)
+    test_dataloader = data_loader(x_test, y_test, args.batch_size, shuffle=False, drop_last=False, seed=args.seed)
     return train_dataloader, val_dataloader, test_dataloader, scaler
 
 def get_adjacency_matrix2(distance_df_filename, num_of_vertices,
