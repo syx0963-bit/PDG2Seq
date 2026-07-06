@@ -60,15 +60,16 @@ class Trainer(object):
                 label = target[..., :self.args.output_dim].clone()
                 target[...,:self.args.output_dim] = self.scaler.transform(target[...,:self.args.output_dim])
                 output = self.model(data, target)
-                if self.args.real_value:
-                    output = self.scaler.inverse_transform(output)
-                    # label = self.scaler.inverse_transform(label)
                 loss = self.loss(output.cuda(), label)
                 #a whole batch of Metr_LA is filtered
                 if not torch.isnan(loss):
                     total_val_loss += loss.item()
-                y_true.append(label)
-                y_pred.append(output)
+                if self.args.real_value:
+                    y_pred.append(self.scaler.inverse_transform(output))
+                    y_true.append(self.scaler.inverse_transform(label))
+                else:
+                    y_pred.append(output)
+                    y_true.append(label)
         val_loss = total_val_loss / len(val_dataloader)
         mae, rmse, mape, _, corr = All_Metrics(torch.cat(y_pred, dim=0), torch.cat(y_true, dim=0),
                                                self.args.mae_thresh, self.args.mape_thresh)
@@ -89,15 +90,16 @@ class Trainer(object):
                 label = target[..., :self.args.output_dim].clone()
                 target[...,:self.args.output_dim] = self.scaler.transform(target[...,:self.args.output_dim])
                 output = self.model(data, target)
-                if self.args.real_value:
-                    output = self.scaler.inverse_transform(output)
-                    # label = self.scaler.inverse_transform(label)
                 loss = self.loss(output.cuda(), label)
                 #a whole batch of Metr_LA is filtered
                 if not torch.isnan(loss):
                     total_test_loss += loss.item()
-                y_true.append(label)
-                y_pred.append(output)
+                if self.args.real_value:
+                    y_pred.append(self.scaler.inverse_transform(output))
+                    y_true.append(self.scaler.inverse_transform(label))
+                else:
+                    y_pred.append(output)
+                    y_true.append(label)
         test_loss = total_test_loss / len(test_dataloader)
         mae, rmse, mape, _, corr = All_Metrics(torch.cat(y_pred, dim=0), torch.cat(y_true, dim=0),
                                                self.args.mae_thresh, self.args.mape_thresh)
@@ -218,6 +220,15 @@ class Trainer(object):
             self._log_epoch_progress(epoch, train_epoch_loss, val_metrics, test_metrics,
                                      best_loss, best_test_loss, not_improved_count)
 
+            if (
+                not self.args.debug
+                and getattr(self.args, 'save_every', 0) > 0
+                and epoch % self.args.save_every == 0
+            ):
+                checkpoint_path = os.path.join(self.args.log_dir, 'epoch_{}.pth'.format(epoch))
+                torch.save(self.model.state_dict(), checkpoint_path)
+                self.logger.info("Saving epoch {} model to {}".format(epoch, checkpoint_path))
+
 
         # training_time = time.time() - start_time
         # self.logger.info("Total training time: {:.4f}min, best loss: {:.6f}".format((training_time / 60), best_loss))
@@ -303,7 +314,7 @@ class Trainer(object):
         #y_true = scaler.inverse_transform(torch.cat(y_true, dim=0))
         if args.real_value:
             y_pred = scaler.inverse_transform(torch.cat(y_pred, dim=0))
-            y_true = torch.cat(y_true, dim=0)
+            y_true = scaler.inverse_transform(torch.cat(y_true, dim=0))
         else:
             y_pred = torch.cat(y_pred, dim=0)
             y_true = torch.cat(y_true, dim=0)

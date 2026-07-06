@@ -60,14 +60,14 @@ def masked_mae_loss(scaler, mask_value):
 # MODEL = 'DDGCRN'
 
 #parser
-args = argparse.ArgumentParser(description='arguments')
+args = argparse.ArgumentParser(description='arguments', add_help=False)
 args.add_argument('--dataset', default='PEMSD4', type=str)  #PEMSD4
 args.add_argument('--mode', default='train', type=str)
 args.add_argument('--device', default='cuda:0', type=str, help='indices of GPUs')
 args.add_argument('--debug', default=False, type=str_to_bool)
 args.add_argument('--model', default='PDG2Seq', type=str)
 args.add_argument('--cuda', default=True, type=str_to_bool)
-args1 = args.parse_args()
+args1, _ = args.parse_known_args()
 
 #get configuration
 config_file = './config_file/{}_{}.conf'.format(args1.dataset, args1.model)
@@ -123,12 +123,14 @@ args.add_argument('--early_stop', default=config['train']['early_stop'], type=st
 args.add_argument('--early_stop_patience', default=config['train']['early_stop_patience'], type=int)
 args.add_argument('--grad_norm', default=config['train']['grad_norm'], type=str_to_bool)
 args.add_argument('--max_grad_norm', default=config['train']['max_grad_norm'], type=int)
+args.add_argument('--save_every', default=0, type=int)
 args.add_argument('--teacher_forcing', default=False, type=str_to_bool)
 args.add_argument('--real_value', default=config['train']['real_value'], type=str_to_bool, help = 'use real value for loss calculation')
 #test
 args.add_argument('--mae_thresh', default=config['test']['mae_thresh'], type=optional_float)
 args.add_argument('--mape_thresh', default=config['test']['mape_thresh'], type=float)
 #log
+args.add_argument('-h', '--help', action='help', help='show this help message and exit')
 args.add_argument('--log_dir', default='./', type=str)
 args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
