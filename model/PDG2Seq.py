@@ -56,7 +56,7 @@ class PDG2Seq_Dncoder(nn.Module):
         self.PDG2Seq_cells = nn.ModuleList()
         self.PDG2Seq_cells.append(PDG2SeqCell(node_num, dim_in, dim_out, cheb_k, embed_dim, time_dim, args=args))
         for _ in range(1, num_layers):
-            self.PDG2Seq_cells.append(PDG2SeqCell(node_num, dim_in, dim_out, cheb_k, embed_dim, time_dim, args=args))
+            self.PDG2Seq_cells.append(PDG2SeqCell(node_num, dim_out, dim_out, cheb_k, embed_dim, time_dim, args=args))
 
     def forward(self, xt, init_state, node_embeddings):
         assert xt.shape[1] == self.node_num and xt.shape[2] == self.input_dim
@@ -81,12 +81,15 @@ class PDG2Seq(nn.Module):
         self.use_D = args.use_day
         self.use_W = args.use_week
         self.use_context_graph_refine = args.use_context_graph_refine
+        self.use_periodic_graph_context = args.use_periodic_context and args.use_context_graph_refine
+        self.steps_per_day = args.steps_per_day
+        self.steps_per_week = args.steps_per_week
         self.cl_decay_steps = args.lr_decay_step
         self.node_embeddings1 = nn.Parameter(torch.empty(self.num_node, args.embed_dim))
-        self.T_i_D_emb1 = nn.Parameter(torch.empty(288, args.time_dim))
-        self.D_i_W_emb1 = nn.Parameter(torch.empty(7, args.time_dim))
-        self.T_i_D_emb2 = nn.Parameter(torch.empty(288, args.time_dim))
-        self.D_i_W_emb2 = nn.Parameter(torch.empty(7, args.time_dim))
+        self.T_i_D_emb1 = nn.Parameter(torch.empty(self.steps_per_day, args.time_dim))
+        self.D_i_W_emb1 = nn.Parameter(torch.empty(self.steps_per_week, args.time_dim))
+        self.T_i_D_emb2 = nn.Parameter(torch.empty(self.steps_per_day, args.time_dim))
+        self.D_i_W_emb2 = nn.Parameter(torch.empty(self.steps_per_week, args.time_dim))
 
         self.encoder = PDG2Seq_Encoder(
             args.num_nodes, args.input_dim, args.rnn_units, args.cheb_k,
@@ -102,8 +105,8 @@ class PDG2Seq(nn.Module):
     def forward(self, source, traget=None, batches_seen=None):
         t_i_d_data1 = source[..., 0, -2]
         t_i_d_data2 = traget[..., 0, -2]
-        t_i_d_idx1 = (t_i_d_data1 * 288).long().to(source.device)
-        t_i_d_idx2 = (t_i_d_data2 * 288).long().to(traget.device)
+        t_i_d_idx1 = torch.clamp((t_i_d_data1 * self.steps_per_day).long(), 0, self.steps_per_day - 1).to(source.device)
+        t_i_d_idx2 = torch.clamp((t_i_d_data2 * self.steps_per_day).long(), 0, self.steps_per_day - 1).to(traget.device)
         T_i_D_emb1_en = self.T_i_D_emb1[t_i_d_idx1]
         T_i_D_emb2_en = self.T_i_D_emb2[t_i_d_idx1]
 
@@ -112,8 +115,8 @@ class PDG2Seq(nn.Module):
         if self.use_W:
             d_i_w_data1 = source[..., 0, -1]
             d_i_w_data2 = traget[..., 0, -1]
-            d_i_w_idx1 = d_i_w_data1.long().to(source.device)
-            d_i_w_idx2 = d_i_w_data2.long().to(traget.device)
+            d_i_w_idx1 = torch.clamp(d_i_w_data1.long(), 0, self.steps_per_week - 1).to(source.device)
+            d_i_w_idx2 = torch.clamp(d_i_w_data2.long(), 0, self.steps_per_week - 1).to(traget.device)
             D_i_W_emb1_en = self.D_i_W_emb1[d_i_w_idx1]
             D_i_W_emb2_en = self.D_i_W_emb2[d_i_w_idx1]
 
@@ -134,7 +137,7 @@ class PDG2Seq(nn.Module):
 
         en_node_embeddings = [node_embedding_en1, node_embedding_en2, self.node_embeddings1]
 
-        if self.use_context_graph_refine:
+        if self.use_periodic_graph_context:
             source_traffic = source[..., 0:1]
             periodic_context = source[..., 1:2]
             context_valid = source[..., 2:3]

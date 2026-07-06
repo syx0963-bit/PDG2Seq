@@ -211,7 +211,7 @@ trainer = Trainer(model, loss, optimizer, train_loader, val_loader, test_loader,
 if args.mode == 'train':
     trainer.train()
 elif args.mode == 'test':
-    model.load_state_dict(torch.load('./pre-trained/{}.pth'.format(args.dataset)))
+    model.load_state_dict(torch.load('./pre-trained/{}.pth'.format(args.dataset), map_location=args.device))
     print("Load saved model")
     trainer.test(model, trainer.args, test_loader, scaler, trainer.logger)
 else:

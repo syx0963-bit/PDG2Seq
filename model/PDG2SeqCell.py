@@ -90,11 +90,15 @@ class PDG2SeqCell(nn.Module):
         return h
 
     def _maybe_refine_adjs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None):
-        if not self.use_dgq:
+        if not self.use_dgq and not self.use_context_graph_refine:
             return adj_in, adj_out
 
-        q_in_dgq = self._compute_dgq_quality(signal, self.dgq_src_in, self.dgq_dst_in)
-        q_out_dgq = self._compute_dgq_quality(signal, self.dgq_src_out, self.dgq_dst_out)
+        if self.use_dgq:
+            q_in_dgq = self._compute_dgq_quality(signal, self.dgq_src_in, self.dgq_dst_in)
+            q_out_dgq = self._compute_dgq_quality(signal, self.dgq_src_out, self.dgq_dst_out)
+        else:
+            q_in_dgq = torch.ones_like(adj_in)
+            q_out_dgq = torch.ones_like(adj_out)
         q_in_final = q_in_dgq
         q_out_final = q_out_dgq
 
@@ -109,12 +113,15 @@ class PDG2SeqCell(nn.Module):
         if self._dgq_debug_count < 3:
             delta_in = torch.mean(torch.abs(refined_in - adj_in)).detach().cpu().item()
             delta_out = torch.mean(torch.abs(refined_out - adj_out)).detach().cpu().item()
+            max_delta_in = torch.max(torch.abs(refined_in - adj_in)).detach().cpu().item()
+            max_delta_out = torch.max(torch.abs(refined_out - adj_out)).detach().cpu().item()
             has_invalid = (not torch.isfinite(refined_in).all().item()) or (not torch.isfinite(refined_out).all().item())
             print(
                 '[DGQ Debug] '
                 f'Q_in mean/min/max={q_in_final.mean().item():.6f}/{q_in_final.min().item():.6f}/{q_in_final.max().item():.6f}, '
                 f'Q_out mean/min/max={q_out_final.mean().item():.6f}/{q_out_final.min().item():.6f}/{q_out_final.max().item():.6f}, '
-                f'mean|A_in_refined-A_in|={delta_in:.6f}, mean|A_out_refined-A_out|={delta_out:.6f}, '
+                f'mean|A_in_refined-A_in|={delta_in:.6e}, max|A_in_refined-A_in|={max_delta_in:.6e}, '
+                f'mean|A_out_refined-A_out|={delta_out:.6e}, max|A_out_refined-A_out|={max_delta_out:.6e}, '
                 f'A_refined_has_nan_or_inf={has_invalid}'
             )
             self._dgq_debug_count += 1
@@ -165,7 +172,8 @@ class PDG2SeqCell(nn.Module):
         return q_in_final, q_out_final
 
     def _apply_residual_gate(self, adj, quality):
-        refined = adj * ((1.0 - self.dgq_alpha) + self.dgq_alpha * quality)
+        scale = 1.0 + self.dgq_alpha * (2.0 * quality - 1.0)
+        refined = adj * scale.clamp_min(1.0e-4)
         refined = torch.nan_to_num(refined, nan=0.0, posinf=0.0, neginf=0.0)
         row_sum = refined.sum(-1, keepdim=True).clamp_min(1.0e-8)
         return refined / row_sum

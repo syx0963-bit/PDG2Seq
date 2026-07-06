@@ -2,25 +2,33 @@ import os
 import numpy as np
 import pandas as pd
 
+
+def _resolve_data_path(*relative_candidates):
+    for relative_path in relative_candidates:
+        if os.path.exists(relative_path):
+            return relative_path
+    raise FileNotFoundError('Dataset file not found. Tried: {}'.format(', '.join(relative_candidates)))
+
+
 def load_st_dataset(dataset):
     #output B, N, D
     if dataset == 'PEMSD3':
-        data_path = os.path.join('./data/PeMS03/PEMS03.npz')
+        data_path = _resolve_data_path('./data/PeMS03/PEMS03.npz', './data/data/PeMS03/PEMS03.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD4':
-        data_path = os.path.join('./data/PeMS04/PEMS04.npz')
+        data_path = _resolve_data_path('./data/PeMS04/PEMS04.npz', './data/data/PeMS04/PEMS04.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD7':
-        data_path = os.path.join('./data/PeMS07/PEMS07.npz')
+        data_path = _resolve_data_path('./data/PeMS07/PEMS07.npz', './data/data/PEMS07/PEMS07.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD8':
-        data_path = os.path.join('./data/PeMS08/PEMS08.npz')
+        data_path = _resolve_data_path('./data/PeMS08/PEMS08.npz', './data/data/PEMS08/PEMS08.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD7(L)':
-        data_path = os.path.join('./data/PEMS07(L)/PEMS07L.npz')
+        data_path = _resolve_data_path('./data/PEMS07(L)/PEMS07L.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD7(M)':
-        data_path = os.path.join('./data/PEMS07(M)/V_228.csv')
+        data_path = _resolve_data_path('./data/PEMS07(M)/V_228.csv', './data/data/PEMS07(M)/V_228.csv')
         data = np.array(pd.read_csv(data_path,header=None))  #onley the first dimension, traffic flow data
     else:
         raise ValueError

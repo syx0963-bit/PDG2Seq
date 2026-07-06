@@ -188,7 +188,7 @@ def get_dataloader(args, normalizer = 'std', tod=False, dow=False, weather=False
     if len(x_val[...,0]) == 0:
         val_dataloader = None
     else:
-        val_dataloader = data_loader(x_val, y_val, args.batch_size, shuffle=False, drop_last=True, seed=args.seed)
+        val_dataloader = data_loader(x_val, y_val, args.batch_size, shuffle=False, drop_last=False, seed=args.seed)
     test_dataloader = data_loader(x_test, y_test, args.batch_size, shuffle=False, drop_last=False, seed=args.seed)
     return train_dataloader, val_dataloader, test_dataloader, scaler
 
