@@ -122,6 +122,57 @@ def _build_periodic_context(raw_norm, start_indices, window, args):
     return periodic_context, context_valid
 
 
+def _build_target_periodic_reference(raw_norm, start_indices, lag, horizon, args):
+    periodic_ref = np.zeros((len(start_indices), horizon, raw_norm.shape[1], raw_norm.shape[2]), dtype=np.float32)
+    periodic_valid = np.zeros((len(start_indices), horizon, raw_norm.shape[1], 1), dtype=np.float32)
+    temperature = max(float(args.context_temperature), 1.0e-6)
+
+    def cosine_similarity(cur_seq, ref_seq):
+        cur_flat = np.transpose(cur_seq, (1, 0, 2)).reshape(cur_seq.shape[1], -1)
+        ref_flat = np.transpose(ref_seq, (1, 0, 2)).reshape(ref_seq.shape[1], -1)
+        numerator = np.sum(cur_flat * ref_flat, axis=-1)
+        denominator = np.linalg.norm(cur_flat, axis=-1) * np.linalg.norm(ref_flat, axis=-1)
+        return numerator / np.clip(denominator, 1.0e-8, None)
+
+    for sample_idx, start_idx in enumerate(start_indices):
+        current_lag = raw_norm[start_idx:start_idx + lag]
+        target_start = start_idx + lag
+        candidates = []
+        scores = []
+
+        if start_idx >= args.periodic_day_steps:
+            day_lag = raw_norm[start_idx - args.periodic_day_steps:start_idx - args.periodic_day_steps + lag]
+            day_target = raw_norm[target_start - args.periodic_day_steps:target_start - args.periodic_day_steps + horizon]
+            candidates.append(day_target)
+            scores.append(cosine_similarity(current_lag, day_lag))
+
+        if start_idx >= args.periodic_week_steps:
+            week_lag = raw_norm[start_idx - args.periodic_week_steps:start_idx - args.periodic_week_steps + lag]
+            week_target = raw_norm[target_start - args.periodic_week_steps:target_start - args.periodic_week_steps + horizon]
+            candidates.append(week_target)
+            scores.append(cosine_similarity(current_lag, week_lag))
+
+        if not candidates:
+            continue
+
+        periodic_valid[sample_idx] = 1.0
+        if len(candidates) == 1:
+            periodic_ref[sample_idx] = candidates[0]
+            continue
+
+        score_stack = np.stack(scores, axis=-1) / temperature
+        score_stack = score_stack - np.max(score_stack, axis=-1, keepdims=True)
+        weights = np.exp(score_stack)
+        weights = weights / np.clip(np.sum(weights, axis=-1, keepdims=True), 1.0e-8, None)
+
+        fused = np.zeros_like(candidates[0], dtype=np.float32)
+        for candidate_idx, candidate in enumerate(candidates):
+            fused += candidate * weights[:, candidate_idx][None, :, None]
+        periodic_ref[sample_idx] = fused
+
+    return periodic_ref, periodic_valid
+
+
 def data_loader(X, Y, batch_size, shuffle=True, drop_last=True, seed=None):
     cuda = True if torch.cuda.is_available() else False
     TensorFloat = torch.cuda.FloatTensor if cuda else torch.FloatTensor
@@ -174,7 +225,13 @@ def get_dataloader(args, normalizer = 'std', tod=False, dow=False, weather=False
         x = np.concatenate([x_traffic, periodic_context, context_valid, x_day, x_week], axis=-1)
     else:
         x = np.concatenate([x_traffic, x_day, x_week], axis=-1)
-    y = np.concatenate([y_traffic, y_day, y_week], axis=-1)
+    if getattr(args, 'use_periodic_consistency', False):
+        y_periodic_ref, y_periodic_valid = _build_target_periodic_reference(
+            raw_norm, start_indices, args.lag, args.horizon, args
+        )
+        y = np.concatenate([y_traffic, y_periodic_ref, y_periodic_valid, y_day, y_week], axis=-1)
+    else:
+        y = np.concatenate([y_traffic, y_day, y_week], axis=-1)
 
     x_train, x_val, x_test = x[train_starts], x[val_starts], x[test_starts]
     y_train, y_val, y_test = y[train_starts], y[val_starts], y[test_starts]

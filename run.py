@@ -101,6 +101,8 @@ args.add_argument('--use_week', default=config['model']['use_week'], type=str_to
 args.add_argument('--use_dgq', default=False, type=str_to_bool)
 args.add_argument('--dgq_alpha', default=0.1, type=float)
 args.add_argument('--dgq_dim', default=16, type=int)
+args.add_argument('--dgq_eval_ensemble', default=True, type=str_to_bool)
+args.add_argument('--dgq_teacher_path', default='', type=str)
 args.add_argument('--use_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
 args.add_argument('--context_graph_lambda', default=0.05, type=float)
@@ -108,6 +110,8 @@ args.add_argument('--context_graph_dim', default=16, type=int)
 args.add_argument('--periodic_day_steps', default=288, type=int)
 args.add_argument('--periodic_week_steps', default=2016, type=int)
 args.add_argument('--context_temperature', default=1.0, type=float)
+args.add_argument('--use_periodic_consistency', default=False, type=str_to_bool)
+args.add_argument('--periodic_consistency_eval', default=True, type=str_to_bool)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--seed', default=config['train']['seed'], type=int)
@@ -136,6 +140,8 @@ args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
+if args.use_dgq and args.dgq_eval_ensemble and not args.dgq_teacher_path:
+    args.dgq_teacher_path = './pre-trained/{}.pth'.format(args.dataset)
 
 print(args)
 
@@ -201,8 +207,26 @@ def get_current_git_branch():
         branch = 'unknown_branch'
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', branch)
 
+
+def build_innovation_name(args):
+    names = []
+    if args.use_dgq:
+        names.append('DGQ')
+        if args.dgq_eval_ensemble:
+            names.append('DGQEnsemble')
+    if args.use_periodic_context:
+        names.append('PeriodicContext')
+    if args.use_context_graph_refine:
+        names.append('ContextGraphRefine')
+    if args.use_periodic_consistency:
+        names.append('PeriodicConsistency')
+    if not names:
+        names.append('Baseline')
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(names))
+
+
 root_log_dir = os.path.join(current_dir, args.root_log_dir)
-root_log_name = '{}_{}.log'.format(get_current_git_branch(), current_time)
+root_log_name = '{}_{}_{}.log'.format(get_current_git_branch(), build_innovation_name(args), current_time)
 args.root_log_file = os.path.join(root_log_dir, root_log_name)
 
 #start training

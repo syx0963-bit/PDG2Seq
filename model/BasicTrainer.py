@@ -7,6 +7,7 @@ import numpy as np
 import pynvml
 from lib.logger import get_logger
 from lib.metrics import All_Metrics
+from model.PDG2Seq import PDG2Seq
 
 try:
     pynvml.nvmlInit()
@@ -224,11 +225,11 @@ class Trainer(object):
             self.logger.info("Saving current best model to " + self.best_test_path)
 
         self.model.load_state_dict(best_model)
-        self.test(self.model, self.args, self.test_loader, self.scaler, self.logger)
+        self._test_or_dgq_ensemble("This is best_model")
 
         self.logger.info("This is best_test_model")
         self.model.load_state_dict(best_test_model)
-        self.test(self.model, self.args, self.test_loader, self.scaler, self.logger)
+        self._test_or_dgq_ensemble("This is best_test_model")
 
     def save_checkpoint(self):
         state = {
@@ -271,6 +272,180 @@ class Trainer(object):
                 best_val_loss, best_test_loss, not_improved_count
             )
         )
+
+    def _test_or_dgq_ensemble(self, title):
+        if not self._should_use_dgq_ensemble():
+            self.test(self.model, self.args, self.test_loader, self.scaler, self.logger)
+            return
+
+        teacher = self._load_dgq_teacher()
+        if teacher is None:
+            self.test(self.model, self.args, self.test_loader, self.scaler, self.logger)
+            return
+
+        weights = self._fit_dgq_ensemble_weights(teacher)
+        self.logger.info("{} with DGQ validation ensemble".format(title))
+        self.logger.info(
+            "DGQ ensemble teacher: {}, horizon weights: {}".format(
+                self.args.dgq_teacher_path,
+                ",".join(["{:.4f}".format(w) for w in weights.view(-1).tolist()])
+            )
+        )
+        periodic_weights = None
+        if self._should_use_periodic_consistency():
+            periodic_weights = self._fit_periodic_consistency_weights(teacher, weights)
+            self.logger.info(
+                "Periodic consistency horizon weights: {}".format(
+                    ",".join(["{:.4f}".format(w) for w in periodic_weights.view(-1).tolist()])
+                )
+            )
+        self.test_dgq_ensemble(
+            self.model, teacher, weights, self.args, self.test_loader, self.scaler, self.logger,
+            periodic_weights=periodic_weights
+        )
+
+    def _should_use_dgq_ensemble(self):
+        return (
+            getattr(self.args, 'use_dgq', False)
+            and getattr(self.args, 'dgq_eval_ensemble', False)
+            and getattr(self.args, 'dgq_teacher_path', '')
+            and self.val_loader is not None
+        )
+
+    def _should_use_periodic_consistency(self):
+        return (
+            getattr(self.args, 'use_periodic_consistency', False)
+            and getattr(self.args, 'periodic_consistency_eval', False)
+        )
+
+    def _load_dgq_teacher(self):
+        teacher_path = getattr(self.args, 'dgq_teacher_path', '')
+        if not teacher_path or not os.path.exists(teacher_path):
+            self.logger.warning("DGQ ensemble teacher not found: {}".format(teacher_path))
+            return None
+
+        teacher_args = copy.copy(self.args)
+        teacher_args.use_dgq = False
+        teacher_args.use_periodic_context = False
+        teacher_args.use_context_graph_refine = False
+        teacher = PDG2Seq(teacher_args).to(self.args.device)
+        state = torch.load(teacher_path, map_location=self.args.device)
+        if isinstance(state, dict) and 'state_dict' in state:
+            state = state['state_dict']
+        teacher.load_state_dict(state)
+        teacher.eval()
+        return teacher
+
+    def _collect_real_predictions(self, model, data_loader):
+        model.eval()
+        y_pred = []
+        y_true = []
+        with torch.no_grad():
+            for data, target in data_loader:
+                label = target[..., :self.args.output_dim]
+                output = model(data, target)
+                y_pred.append(self.scaler.inverse_transform(output).detach().cpu())
+                y_true.append(self.scaler.inverse_transform(label).detach().cpu())
+        return torch.cat(y_pred, dim=0), torch.cat(y_true, dim=0)
+
+    def _fit_dgq_ensemble_weights(self, teacher):
+        dgq_pred, y_true = self._collect_real_predictions(self.model, self.val_loader)
+        teacher_pred, _ = self._collect_real_predictions(teacher, self.val_loader)
+
+        weights = []
+        grid = torch.linspace(-1.0, 2.0, 301)
+        for horizon_idx in range(self.args.horizon):
+            best_weight = 1.0
+            best_mae = float('inf')
+            dgq_h = dgq_pred[:, horizon_idx]
+            teacher_h = teacher_pred[:, horizon_idx]
+            true_h = y_true[:, horizon_idx]
+            for weight in grid:
+                blended = weight * dgq_h + (1.0 - weight) * teacher_h
+                mae = torch.mean(torch.abs(blended - true_h)).item()
+                if mae < best_mae:
+                    best_mae = mae
+                    best_weight = float(weight.item())
+            weights.append(best_weight)
+        return torch.tensor(weights, device=self.args.device).view(1, self.args.horizon, 1, 1)
+
+    def _fit_periodic_consistency_weights(self, teacher, dgq_weights):
+        self.model.eval()
+        teacher.eval()
+        ensemble_pred = []
+        periodic_ref = []
+        periodic_valid = []
+        y_true = []
+        with torch.no_grad():
+            for data, target in self.val_loader:
+                label = target[..., :self.args.output_dim]
+                dgq_output = self.model(data, target)
+                teacher_output = teacher(data, target)
+                output = dgq_weights * dgq_output + (1.0 - dgq_weights) * teacher_output
+                ensemble_pred.append(self.scaler.inverse_transform(output).detach().cpu())
+                periodic_ref.append(self.scaler.inverse_transform(target[..., 1:2]).detach().cpu())
+                periodic_valid.append(target[..., 2:3].detach().cpu())
+                y_true.append(self.scaler.inverse_transform(label).detach().cpu())
+
+        ensemble_pred = torch.cat(ensemble_pred, dim=0)
+        periodic_ref = torch.cat(periodic_ref, dim=0)
+        periodic_valid = torch.cat(periodic_valid, dim=0)
+        y_true = torch.cat(y_true, dim=0)
+
+        weights = []
+        grid = torch.linspace(0.0, 0.5, 101)
+        for horizon_idx in range(self.args.horizon):
+            valid_h = periodic_valid[:, horizon_idx] > 0.5
+            if not valid_h.any():
+                weights.append(0.0)
+                continue
+
+            best_weight = 0.0
+            best_mae = float('inf')
+            pred_h = ensemble_pred[:, horizon_idx]
+            ref_h = periodic_ref[:, horizon_idx]
+            true_h = y_true[:, horizon_idx]
+            valid_h = valid_h.expand_as(true_h)
+            for weight in grid:
+                blended = (1.0 - weight) * pred_h + weight * ref_h
+                mae = torch.mean(torch.abs(blended[valid_h] - true_h[valid_h])).item()
+                if mae < best_mae:
+                    best_mae = mae
+                    best_weight = float(weight.item())
+            weights.append(best_weight)
+        return torch.tensor(weights, device=self.args.device).view(1, self.args.horizon, 1, 1)
+
+    @staticmethod
+    def test_dgq_ensemble(model, teacher, weights, args, data_loader, scaler, logger,
+                          periodic_weights=None):
+        model.eval()
+        teacher.eval()
+        y_pred = []
+        y_true = []
+        with torch.no_grad():
+            for data, target in data_loader:
+                label = target[..., :args.output_dim]
+                dgq_output = model(data, target)
+                teacher_output = teacher(data, target)
+                output = weights * dgq_output + (1.0 - weights) * teacher_output
+                if periodic_weights is not None:
+                    periodic_ref = target[..., 1:2]
+                    periodic_valid = target[..., 2:3]
+                    periodic_output = (1.0 - periodic_weights) * output + periodic_weights * periodic_ref
+                    output = periodic_valid * periodic_output + (1.0 - periodic_valid) * output
+                y_true.append(label)
+                y_pred.append(output)
+
+        y_pred = scaler.inverse_transform(torch.cat(y_pred, dim=0))
+        y_true = scaler.inverse_transform(torch.cat(y_true, dim=0))
+        for t in range(y_true.shape[1]):
+            mae, rmse, mape, _, corr = All_Metrics(y_pred[:, t, ...], y_true[:, t, ...],
+                                                   args.mae_thresh, args.mape_thresh)
+            logger.info("Horizon {:02d}, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}%".format(
+                t + 1, rmse, mae, mape * 100))
+        mae, rmse, mape, _, corr = All_Metrics(y_pred, y_true, args.mae_thresh, args.mape_thresh)
+        logger.info("test1 Average Horizon, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}%".format(
+            rmse, mae, mape * 100))
 
     @staticmethod
     def test(model, args, data_loader, scaler, logger, path=None):
