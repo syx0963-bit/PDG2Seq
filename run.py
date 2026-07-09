@@ -193,8 +193,6 @@ if args.lr_decay:
 #config log path
 current_time = datetime.now().strftime('%Y%m%d%H%M%S')
 current_dir = os.path.dirname(os.path.realpath(__file__))
-log_dir = os.path.join(current_dir,'experiments', args.dataset, current_time)
-args.log_dir = log_dir
 
 def get_current_git_branch():
     try:
@@ -225,8 +223,12 @@ def build_innovation_name(args):
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(names))
 
 
+run_name = '{}_{}_{}'.format(get_current_git_branch(), build_innovation_name(args), current_time)
+log_dir = os.path.join(current_dir, 'experiments', args.dataset, run_name)
+args.log_dir = log_dir
+
 root_log_dir = os.path.join(current_dir, args.root_log_dir)
-root_log_name = '{}_{}_{}.log'.format(get_current_git_branch(), build_innovation_name(args), current_time)
+root_log_name = '{}.log'.format(run_name)
 args.root_log_file = os.path.join(root_log_dir, root_log_name)
 
 #start training
