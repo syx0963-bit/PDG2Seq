@@ -141,6 +141,8 @@ class PDG2SeqCell(nn.Module):
     def _decouple_signal(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         batch_size = x.shape[0]
         time_context = 0.5 * (node_embeddings[0] + node_embeddings[1])
+        if time_context.dim() == 2:
+            time_context = time_context.unsqueeze(1).expand(-1, self.node_num, -1)
         static_embedding = node_embeddings[2].unsqueeze(0).expand(batch_size, -1, -1)
         if periodic_context is None:
             periodic_signal = torch.zeros_like(x)

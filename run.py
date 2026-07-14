@@ -117,6 +117,7 @@ args.add_argument('--periodic_week_steps', default=2016, type=int)
 args.add_argument('--context_temperature', default=1.0, type=float)
 args.add_argument('--use_periodic_consistency', default=False, type=str_to_bool)
 args.add_argument('--periodic_consistency_eval', default=True, type=str_to_bool)
+args.add_argument('--use_decoder_periodic_context', default=False, type=str_to_bool)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--seed', default=config['train']['seed'], type=int)
@@ -223,6 +224,8 @@ def build_innovation_name(args):
         names.append('ContextGraphRefine')
     if args.use_signal_decouple:
         names.append('SignalDecouple')
+        if args.use_decoder_periodic_context:
+            names.append('DecoderPeriodicContext')
     if args.use_periodic_consistency:
         names.append('PeriodicConsistency')
     if not names:
