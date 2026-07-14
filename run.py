@@ -107,6 +107,11 @@ args.add_argument('--use_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
 args.add_argument('--context_graph_lambda', default=0.05, type=float)
 args.add_argument('--context_graph_dim', default=16, type=int)
+args.add_argument('--use_signal_decouple', default=False, type=str_to_bool)
+args.add_argument('--signal_decouple_hidden', default=32, type=int)
+args.add_argument('--signal_diffusion_bias', default=1.5, type=float)
+args.add_argument('--signal_fuse_diffusion_bias', default=1.0, type=float)
+args.add_argument('--signal_inherent_scale', default=0.3, type=float)
 args.add_argument('--periodic_day_steps', default=288, type=int)
 args.add_argument('--periodic_week_steps', default=2016, type=int)
 args.add_argument('--context_temperature', default=1.0, type=float)
@@ -216,6 +221,8 @@ def build_innovation_name(args):
         names.append('PeriodicContext')
     if args.use_context_graph_refine:
         names.append('ContextGraphRefine')
+    if args.use_signal_decouple:
+        names.append('SignalDecouple')
     if args.use_periodic_consistency:
         names.append('PeriodicConsistency')
     if not names:

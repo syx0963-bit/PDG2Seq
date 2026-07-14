@@ -30,12 +30,20 @@ class PDG2SeqCell(nn.Module):
         super(PDG2SeqCell, self).__init__()
         self.node_num = node_num
         self.hidden_dim = dim_out
+        self.input_dim = dim_in
+        self.embed_dim = embed_dim
+        self.time_dim = time_dim
         self.use_dgq = getattr(args, 'use_dgq', False) if args is not None else False
         self.dgq_alpha = getattr(args, 'dgq_alpha', 0.1) if args is not None else 0.1
         self.dgq_dim = getattr(args, 'dgq_dim', 16) if args is not None else 16
         self.use_context_graph_refine = getattr(args, 'use_context_graph_refine', False) if args is not None else False
         self.context_graph_lambda = getattr(args, 'context_graph_lambda', 0.05) if args is not None else 0.05
         self.context_graph_dim = getattr(args, 'context_graph_dim', 16) if args is not None else 16
+        self.use_signal_decouple = getattr(args, 'use_signal_decouple', False) if args is not None else False
+        self.signal_decouple_hidden = getattr(args, 'signal_decouple_hidden', 32) if args is not None else 32
+        self.signal_diffusion_bias = getattr(args, 'signal_diffusion_bias', 1.5) if args is not None else 1.5
+        self.signal_fuse_diffusion_bias = getattr(args, 'signal_fuse_diffusion_bias', 1.0) if args is not None else 1.0
+        self.signal_inherent_scale = getattr(args, 'signal_inherent_scale', 0.3) if args is not None else 0.3
         self.gate = PDG2Seq_GCN(dim_in + self.hidden_dim, 2 * dim_out, cheb_k, embed_dim, time_dim)
         self.update = PDG2Seq_GCN(dim_in + self.hidden_dim, dim_out, cheb_k, embed_dim, time_dim)
         self.fc1 = FC(dim_in + self.hidden_dim, time_dim)
@@ -59,12 +67,45 @@ class PDG2SeqCell(nn.Module):
             self.context_cur_proj = None
             self.context_ctx_proj = None
 
+        if self.use_signal_decouple:
+            decouple_in_dim = dim_in + dim_out + time_dim + embed_dim + dim_in + 1
+            self.signal_gate = nn.Sequential(
+                nn.Linear(decouple_in_dim, self.signal_decouple_hidden),
+                nn.ReLU(),
+                nn.Linear(self.signal_decouple_hidden, dim_in)
+            )
+            self.inherent_gru = nn.GRUCell(dim_in, dim_out)
+            self.periodic_proj = nn.Linear(1, dim_in)
+            self.fuse_gate = nn.Sequential(
+                nn.Linear(2 * dim_out + time_dim + embed_dim, self.signal_decouple_hidden),
+                nn.ReLU(),
+                nn.Linear(self.signal_decouple_hidden, dim_out)
+            )
+            nn.init.constant_(self.signal_gate[-1].bias, self.signal_diffusion_bias)
+            nn.init.constant_(self.fuse_gate[-1].bias, self.signal_fuse_diffusion_bias)
+        else:
+            self.signal_gate = None
+            self.inherent_gru = None
+            self.periodic_proj = None
+            self.fuse_gate = None
+
         self._dgq_debug_count = 0
         self._context_debug_count = 0
+        self._decouple_debug_count = 0
 
     def forward(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         state = state.to(x.device)
-        input_and_state = torch.cat((x, state), dim=-1)
+        if self.use_signal_decouple:
+            x_diff, x_inh, time_context, static_embedding = self._decouple_signal(
+                x, state, node_embeddings, periodic_context, context_valid
+            )
+        else:
+            x_diff = x
+            x_inh = None
+            time_context = None
+            static_embedding = None
+
+        input_and_state = torch.cat((x_diff, state), dim=-1)
         filter1 = self.fc1(input_and_state)
         filter2 = self.fc2(input_and_state)
 
@@ -84,10 +125,56 @@ class PDG2SeqCell(nn.Module):
 
         z_r = torch.sigmoid(self.gate(input_and_state, adj, node_embeddings[2]))
         z, r = torch.split(z_r, self.hidden_dim, dim=-1)
-        candidate = torch.cat((x, z * state), dim=-1)
+        candidate = torch.cat((x_diff, z * state), dim=-1)
         hc = torch.tanh(self.update(candidate, adj, node_embeddings[2]))
-        h = r * state + (1 - r) * hc
+        h_diff = r * state + (1 - r) * hc
+
+        if not self.use_signal_decouple:
+            return h_diff
+
+        h_inh = self._run_inherent_branch(x_inh, state)
+        fuse_input = torch.cat((h_diff, h_inh, time_context, static_embedding), dim=-1)
+        fuse_gate = torch.sigmoid(self.fuse_gate(fuse_input))
+        h = h_diff + self.signal_inherent_scale * (1.0 - fuse_gate) * (h_inh - h_diff)
         return h
+
+    def _decouple_signal(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
+        batch_size = x.shape[0]
+        time_context = 0.5 * (node_embeddings[0] + node_embeddings[1])
+        static_embedding = node_embeddings[2].unsqueeze(0).expand(batch_size, -1, -1)
+        if periodic_context is None:
+            periodic_signal = torch.zeros_like(x)
+        else:
+            periodic_signal = self.periodic_proj(periodic_context)
+        if context_valid is None:
+            context_flag = x.new_zeros(x.shape[0], x.shape[1], 1)
+        else:
+            context_flag = context_valid
+
+        gate_input = torch.cat(
+            (x, state, time_context, static_embedding, periodic_signal * context_flag, context_flag),
+            dim=-1
+        )
+        diffusion_gate = torch.sigmoid(self.signal_gate(gate_input))
+        x_diff = diffusion_gate * x
+        x_inh = (1.0 - diffusion_gate) * x
+
+        if self._decouple_debug_count < 3:
+            print(
+                '[Signal Decouple Debug] '
+                f'gate mean/min/max={diffusion_gate.mean().item():.6f}/{diffusion_gate.min().item():.6f}/{diffusion_gate.max().item():.6f}, '
+                f'x_diff mean={x_diff.mean().item():.6f}, x_inh mean={x_inh.mean().item():.6f}'
+            )
+            self._decouple_debug_count += 1
+
+        return x_diff, x_inh, time_context, static_embedding
+
+    def _run_inherent_branch(self, x_inh, state):
+        batch_size, node_num, _ = x_inh.shape
+        x_flat = x_inh.reshape(batch_size * node_num, self.input_dim)
+        state_flat = state.reshape(batch_size * node_num, self.hidden_dim)
+        h_inh = self.inherent_gru(x_flat, state_flat)
+        return h_inh.view(batch_size, node_num, self.hidden_dim)
 
     def _maybe_refine_adjs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None):
         if not self.use_dgq and not self.use_context_graph_refine:

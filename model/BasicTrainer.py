@@ -328,6 +328,7 @@ class Trainer(object):
         teacher_args.use_dgq = False
         teacher_args.use_periodic_context = False
         teacher_args.use_context_graph_refine = False
+        teacher_args.use_signal_decouple = False
         teacher = PDG2Seq(teacher_args).to(self.args.device)
         state = torch.load(teacher_path, map_location=self.args.device)
         if isinstance(state, dict) and 'state_dict' in state:
