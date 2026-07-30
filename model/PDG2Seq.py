@@ -81,7 +81,10 @@ class PDG2Seq(nn.Module):
         self.use_D = args.use_day
         self.use_W = args.use_week
         self.use_context_graph_refine = args.use_context_graph_refine
-        self.use_periodic_graph_context = args.use_periodic_context and args.use_context_graph_refine
+        self.use_meta_reliable_graph = getattr(args, 'use_meta_reliable_graph', False)
+        self.use_periodic_graph_context = args.use_periodic_context and (
+            args.use_context_graph_refine or self.use_meta_reliable_graph
+        )
         self.steps_per_day = args.steps_per_day
         self.steps_per_week = args.steps_per_week
         self.cl_decay_steps = args.lr_decay_step

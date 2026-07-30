@@ -47,12 +47,17 @@ class PDG2Seq_GCN(nn.Module):
         self.fc1 = FC(dim_in, time_dim)
         self.fc2 = FC(dim_in, time_dim)
 
-    def forward(self, x, adj, node_embedding):
+    def forward(self, x, adj, node_embedding, order_weights=None, meta_scale=None, meta_bias=None):
         #x shaped[B, N, C], node_embeddings shaped [N, D] -> supports shaped [N, N]
         #output shape [B, N, C]
 
 
         x_g = self.gcn(x, adj)
+        if order_weights is not None:
+            if order_weights.dim() == 2:
+                x_g = x_g * order_weights.unsqueeze(-1).unsqueeze(-1)
+            elif order_weights.dim() == 3:
+                x_g = x_g * order_weights.permute(0, 2, 1).unsqueeze(-1)
 
         weights = torch.einsum('nd,dkio->nkio', node_embedding, self.weights_pool)    #[B,N,embed_dim]*[embed_dim,chen_k,dim_in,dim_out] =[B,N,cheb_k,dim_in,dim_out]
                                                                                   #[N, cheb_k, dim_in, dim_out]=[nodes,cheb_k,hidden_size,output_dim]
@@ -61,6 +66,10 @@ class PDG2Seq_GCN(nn.Module):
         x_g = x_g.permute(0, 2, 1, 3)  # B, N, cheb_k, dim_in
         # x_gconv = torch.einsum('bnki,bnkio->bno', x_g, weights) + bias  #b, N, dim_out
         x_gconv = torch.einsum('bnki,nkio->bno', x_g, weights) + bias  #b, N, dim_out
+        if meta_scale is not None:
+            x_gconv = x_gconv * (1.0 + meta_scale)
+        if meta_bias is not None:
+            x_gconv = x_gconv + meta_bias
         # x_gconv = torch.einsum('bnki,kio->bno', x_g, self.weights) + self.bias    #[B,N,cheb_k,dim_in] *[N,cheb_k,dim_in,dim_out] =[B,N,dim_out]
 
         return x_gconv

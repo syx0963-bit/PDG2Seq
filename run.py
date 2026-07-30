@@ -107,6 +107,13 @@ args.add_argument('--use_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
 args.add_argument('--context_graph_lambda', default=0.05, type=float)
 args.add_argument('--context_graph_dim', default=16, type=int)
+args.add_argument('--use_meta_reliable_graph', default=False, type=str_to_bool)
+args.add_argument('--meta_state_dim', default=32, type=int)
+args.add_argument('--meta_graph_modes', default=4, type=int)
+args.add_argument('--meta_graph_alpha', default=0.65, type=float)
+args.add_argument('--meta_stable_lambda', default=0.8, type=float)
+args.add_argument('--meta_anomaly_lambda', default=0.7, type=float)
+args.add_argument('--meta_noise_floor', default=0.2, type=float)
 args.add_argument('--periodic_day_steps', default=288, type=int)
 args.add_argument('--periodic_week_steps', default=2016, type=int)
 args.add_argument('--context_temperature', default=1.0, type=float)
@@ -140,6 +147,11 @@ args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
+if args.use_meta_reliable_graph:
+    args.use_dgq = True
+    args.use_periodic_context = True
+    args.use_context_graph_refine = True
+    args.use_periodic_consistency = True
 if args.use_dgq and args.dgq_eval_ensemble and not args.dgq_teacher_path:
     args.dgq_teacher_path = './pre-trained/{}.pth'.format(args.dataset)
 
@@ -216,6 +228,8 @@ def build_innovation_name(args):
         names.append('PeriodicContext')
     if args.use_context_graph_refine:
         names.append('ContextGraphRefine')
+    if args.use_meta_reliable_graph:
+        names.append('MetaReliableGraph')
     if args.use_periodic_consistency:
         names.append('PeriodicConsistency')
     if not names:

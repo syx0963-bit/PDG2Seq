@@ -220,7 +220,7 @@ def get_dataloader(args, normalizer = 'std', tod=False, dow=False, weather=False
     x_day, y_day = Add_Window_Horizon(time_in_day.astype(np.float32), args.lag, args.horizon, single)
     x_week, y_week = Add_Window_Horizon(day_in_week.astype(np.float32), args.lag, args.horizon, single)
 
-    if args.use_periodic_context and args.use_context_graph_refine:
+    if args.use_periodic_context and (args.use_context_graph_refine or getattr(args, 'use_meta_reliable_graph', False)):
         periodic_context, context_valid = _build_periodic_context(raw_norm, start_indices, args.lag, args)
         x = np.concatenate([x_traffic, periodic_context, context_valid, x_day, x_week], axis=-1)
     else:

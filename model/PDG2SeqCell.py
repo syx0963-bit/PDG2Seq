@@ -29,13 +29,24 @@ class PDG2SeqCell(nn.Module):
     def __init__(self, node_num, dim_in, dim_out, cheb_k, embed_dim, time_dim, args=None):
         super(PDG2SeqCell, self).__init__()
         self.node_num = node_num
+        self.input_dim = dim_in
         self.hidden_dim = dim_out
+        self.cheb_k = cheb_k
+        self.embed_dim = embed_dim
+        self.time_dim = time_dim
         self.use_dgq = getattr(args, 'use_dgq', False) if args is not None else False
         self.dgq_alpha = getattr(args, 'dgq_alpha', 0.1) if args is not None else 0.1
         self.dgq_dim = getattr(args, 'dgq_dim', 16) if args is not None else 16
         self.use_context_graph_refine = getattr(args, 'use_context_graph_refine', False) if args is not None else False
         self.context_graph_lambda = getattr(args, 'context_graph_lambda', 0.05) if args is not None else 0.05
         self.context_graph_dim = getattr(args, 'context_graph_dim', 16) if args is not None else 16
+        self.use_meta_reliable_graph = getattr(args, 'use_meta_reliable_graph', False) if args is not None else False
+        self.meta_state_dim = getattr(args, 'meta_state_dim', 32) if args is not None else 32
+        self.meta_graph_modes = getattr(args, 'meta_graph_modes', 4) if args is not None else 4
+        self.meta_graph_alpha = getattr(args, 'meta_graph_alpha', 0.65) if args is not None else 0.65
+        self.meta_stable_lambda = getattr(args, 'meta_stable_lambda', 0.8) if args is not None else 0.8
+        self.meta_anomaly_lambda = getattr(args, 'meta_anomaly_lambda', 0.7) if args is not None else 0.7
+        self.meta_noise_floor = getattr(args, 'meta_noise_floor', 0.2) if args is not None else 0.2
         self.gate = PDG2Seq_GCN(dim_in + self.hidden_dim, 2 * dim_out, cheb_k, embed_dim, time_dim)
         self.update = PDG2Seq_GCN(dim_in + self.hidden_dim, dim_out, cheb_k, embed_dim, time_dim)
         self.fc1 = FC(dim_in + self.hidden_dim, time_dim)
@@ -59,8 +70,49 @@ class PDG2SeqCell(nn.Module):
             self.context_cur_proj = None
             self.context_ctx_proj = None
 
+        if self.use_meta_reliable_graph:
+            state_in_dim = dim_in + dim_out + time_dim + embed_dim + dim_in + dim_in + 1
+            self.traffic_state_encoder = nn.Sequential(
+                nn.Linear(state_in_dim, self.meta_state_dim),
+                nn.ReLU(),
+                nn.Linear(self.meta_state_dim, self.meta_state_dim),
+                nn.ReLU()
+            )
+            self.traffic_state_head = nn.Linear(self.meta_state_dim, 4)
+            self.graph_mode_head = nn.Linear(self.meta_state_dim, self.meta_graph_modes)
+            self.mode_src_in = nn.Parameter(torch.FloatTensor(self.meta_graph_modes, node_num, self.dgq_dim))
+            self.mode_dst_in = nn.Parameter(torch.FloatTensor(self.meta_graph_modes, node_num, self.dgq_dim))
+            self.mode_src_out = nn.Parameter(torch.FloatTensor(self.meta_graph_modes, node_num, self.dgq_dim))
+            self.mode_dst_out = nn.Parameter(torch.FloatTensor(self.meta_graph_modes, node_num, self.dgq_dim))
+            order_dim = cheb_k * 2 + 1
+            self.gate_order_head = nn.Linear(self.meta_state_dim, order_dim)
+            self.update_order_head = nn.Linear(self.meta_state_dim, order_dim)
+            self.gate_meta_scale = nn.Linear(self.meta_state_dim, 2 * dim_out)
+            self.gate_meta_bias = nn.Linear(self.meta_state_dim, 2 * dim_out)
+            self.update_meta_scale = nn.Linear(self.meta_state_dim, dim_out)
+            self.update_meta_bias = nn.Linear(self.meta_state_dim, dim_out)
+            self.gate_channel_head = nn.Linear(self.meta_state_dim, 2 * dim_out)
+            self.update_channel_head = nn.Linear(self.meta_state_dim, dim_out)
+            self.periodic_proto_proj = nn.Linear(dim_in, self.dgq_dim)
+            self.current_proto_proj = nn.Linear(dim_in, self.dgq_dim)
+        else:
+            self.traffic_state_encoder = None
+            self.traffic_state_head = None
+            self.graph_mode_head = None
+            self.gate_order_head = None
+            self.update_order_head = None
+            self.gate_meta_scale = None
+            self.gate_meta_bias = None
+            self.update_meta_scale = None
+            self.update_meta_bias = None
+            self.gate_channel_head = None
+            self.update_channel_head = None
+            self.periodic_proto_proj = None
+            self.current_proto_proj = None
+
         self._dgq_debug_count = 0
         self._context_debug_count = 0
+        self._meta_debug_count = 0
 
     def forward(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         state = state.to(x.device)
@@ -77,6 +129,12 @@ class PDG2SeqCell(nn.Module):
         adj_in = PDG2SeqCell.preprocessing(F.relu(adj))
         adj_out = PDG2SeqCell.preprocessing(F.relu(-adj.transpose(-2, -1)))
 
+        if self.use_meta_reliable_graph:
+            return self._forward_meta_reliable(
+                x, state, node_embeddings, input_and_state, adj_in, adj_out,
+                periodic_context=periodic_context, context_valid=context_valid
+            )
+
         adj_in, adj_out = self._maybe_refine_adjs(
             adj_in, adj_out, input_and_state, x, periodic_context=periodic_context, context_valid=context_valid
         )
@@ -88,6 +146,139 @@ class PDG2SeqCell(nn.Module):
         hc = torch.tanh(self.update(candidate, adj, node_embeddings[2]))
         h = r * state + (1 - r) * hc
         return h
+
+    def _forward_meta_reliable(self, x, state, node_embeddings, signal, adj_in, adj_out,
+                               periodic_context=None, context_valid=None):
+        state_emb, state_probs = self._encode_traffic_state(x, state, node_embeddings, periodic_context, context_valid)
+        cand_in, cand_out, mode_weights = self._generate_state_candidate_graphs(adj_in, adj_out, state_emb)
+        stable_in, stable_out, anomaly_in, anomaly_out, rel_stats = self._split_reliable_graphs(
+            cand_in, cand_out, signal, x, periodic_context, context_valid
+        )
+
+        gate_order = self._order_weights(self.gate_order_head(state_emb))
+        update_order = self._order_weights(self.update_order_head(state_emb))
+        gate_scale = 0.2 * torch.tanh(self.gate_meta_scale(state_emb))
+        gate_bias = 0.1 * torch.tanh(self.gate_meta_bias(state_emb))
+        update_scale = 0.2 * torch.tanh(self.update_meta_scale(state_emb))
+        update_bias = 0.1 * torch.tanh(self.update_meta_bias(state_emb))
+
+        gate_stable = self.gate(
+            signal, [stable_in, stable_out], node_embeddings[2],
+            order_weights=gate_order, meta_scale=gate_scale, meta_bias=gate_bias
+        )
+        gate_anomaly = self.gate(
+            signal, [anomaly_in, anomaly_out], node_embeddings[2],
+            order_weights=gate_order, meta_scale=gate_scale, meta_bias=gate_bias
+        )
+        gate_mix = torch.sigmoid(self.gate_channel_head(state_emb))
+        z_r = torch.sigmoid(gate_mix * gate_stable + (1.0 - gate_mix) * gate_anomaly)
+        z, r = torch.split(z_r, self.hidden_dim, dim=-1)
+
+        candidate = torch.cat((x, z * state), dim=-1)
+        update_stable = self.update(
+            candidate, [stable_in, stable_out], node_embeddings[2],
+            order_weights=update_order, meta_scale=update_scale, meta_bias=update_bias
+        )
+        update_anomaly = self.update(
+            candidate, [anomaly_in, anomaly_out], node_embeddings[2],
+            order_weights=update_order, meta_scale=update_scale, meta_bias=update_bias
+        )
+        update_mix = torch.sigmoid(self.update_channel_head(state_emb))
+        hc = torch.tanh(update_mix * update_stable + (1.0 - update_mix) * update_anomaly)
+        h = r * state + (1.0 - r) * hc
+
+        if self._meta_debug_count < 3:
+            print(
+                '[MetaReliableGraph Debug] '
+                f'state_probs={state_probs.mean(dim=(0, 1)).detach().cpu().tolist()}, '
+                f'mode_entropy={self._entropy(mode_weights).mean().item():.6f}, '
+                f'stable_rel={rel_stats[0].mean().item():.6f}, '
+                f'anomaly_rel={rel_stats[1].mean().item():.6f}, '
+                f'noise_rel={rel_stats[2].mean().item():.6f}, '
+                f'gate_order={gate_order.mean(dim=(0, 1)).detach().cpu().tolist()}'
+            )
+            self._meta_debug_count += 1
+
+        return h
+
+    def _encode_traffic_state(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
+        batch_size = x.shape[0]
+        time_context = 0.5 * (node_embeddings[0] + node_embeddings[1])
+        if time_context.dim() == 2:
+            time_context = time_context.unsqueeze(1).expand(-1, self.node_num, -1)
+        static_embedding = node_embeddings[2].unsqueeze(0).expand(batch_size, -1, -1)
+        if periodic_context is None:
+            periodic_context = torch.zeros_like(x)
+        if context_valid is None:
+            context_valid = x.new_zeros(x.shape[0], x.shape[1], 1)
+        mismatch = torch.abs(x - periodic_context) * context_valid
+        state_input = torch.cat(
+            (x, state, time_context, static_embedding, periodic_context * context_valid, mismatch, context_valid),
+            dim=-1
+        )
+        state_emb = self.traffic_state_encoder(state_input)
+        state_probs = F.softmax(self.traffic_state_head(state_emb), dim=-1)
+        return state_emb, state_probs
+
+    def _generate_state_candidate_graphs(self, adj_in, adj_out, state_emb):
+        mode_weights = F.softmax(self.graph_mode_head(state_emb), dim=-1)
+        mode_in = self._mode_graph(self.mode_src_in, self.mode_dst_in)
+        mode_out = self._mode_graph(self.mode_src_out, self.mode_dst_out)
+        adaptive_in = torch.einsum('bnm,mnk->bnk', mode_weights, mode_in)
+        adaptive_out = torch.einsum('bnm,mnk->bnk', mode_weights, mode_out)
+        cand_in = self._normalize_graph((1.0 - self.meta_graph_alpha) * adj_in + self.meta_graph_alpha * adaptive_in)
+        cand_out = self._normalize_graph((1.0 - self.meta_graph_alpha) * adj_out + self.meta_graph_alpha * adaptive_out)
+        return cand_in, cand_out, mode_weights
+
+    def _split_reliable_graphs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None):
+        if self.use_dgq:
+            q_in = self._compute_dgq_quality(signal, self.dgq_src_in, self.dgq_dst_in)
+            q_out = self._compute_dgq_quality(signal, self.dgq_src_out, self.dgq_dst_out)
+        else:
+            q_in = torch.ones_like(adj_in)
+            q_out = torch.ones_like(adj_out)
+
+        if periodic_context is None or context_valid is None:
+            stable_rel = 0.5 * (q_in + q_out)
+            anomaly_rel = 1.0 - stable_rel
+            noise_rel = torch.zeros_like(stable_rel)
+        else:
+            cur_proto = F.normalize(self.current_proto_proj(x), dim=-1, eps=1.0e-8)
+            per_proto = F.normalize(self.periodic_proto_proj(periodic_context), dim=-1, eps=1.0e-8)
+            node_consistency = torch.clamp((torch.sum(cur_proto * per_proto, dim=-1) + 1.0) / 2.0, 0.0, 1.0)
+            valid = context_valid.squeeze(-1)
+            edge_valid = valid.unsqueeze(-1) * valid.unsqueeze(-2)
+            consistency = 0.5 * (node_consistency.unsqueeze(-1) + node_consistency.unsqueeze(-2))
+            support = 0.5 * (adj_in + adj_out.transpose(-1, -2))
+            dgq = 0.5 * (q_in + q_out)
+            stable_rel = edge_valid * dgq * (self.meta_stable_lambda * consistency + (1.0 - self.meta_stable_lambda) * support)
+            anomaly_rel = edge_valid * dgq * (1.0 - consistency) * (self.meta_anomaly_lambda + (1.0 - self.meta_anomaly_lambda) * support)
+            noise_rel = torch.clamp(1.0 - dgq - support, 0.0, 1.0)
+            stable_rel = torch.where(edge_valid > 0.0, stable_rel, dgq)
+
+        stable_in = self._normalize_graph(adj_in * torch.clamp(stable_rel, min=self.meta_noise_floor))
+        stable_out = self._normalize_graph(adj_out * torch.clamp(stable_rel, min=self.meta_noise_floor))
+        anomaly_in = self._normalize_graph(adj_in * torch.clamp(anomaly_rel, min=self.meta_noise_floor * 0.5))
+        anomaly_out = self._normalize_graph(adj_out * torch.clamp(anomaly_rel, min=self.meta_noise_floor * 0.5))
+        return stable_in, stable_out, anomaly_in, anomaly_out, (stable_rel, anomaly_rel, noise_rel)
+
+    def _mode_graph(self, src, dst):
+        score = torch.matmul(src, dst.transpose(-1, -2)) / math.sqrt(float(self.dgq_dim))
+        score = score + torch.eye(self.node_num, device=score.device).unsqueeze(0)
+        return F.softmax(score, dim=-1)
+
+    def _order_weights(self, logits):
+        weights = F.softmax(logits, dim=-1)
+        return weights * weights.shape[-1]
+
+    @staticmethod
+    def _entropy(weights):
+        return -(weights * torch.log(weights.clamp_min(1.0e-8))).sum(dim=-1)
+
+    @staticmethod
+    def _normalize_graph(adj):
+        adj = torch.nan_to_num(adj, nan=0.0, posinf=0.0, neginf=0.0)
+        return adj / adj.sum(-1, keepdim=True).clamp_min(1.0e-8)
 
     def _maybe_refine_adjs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None):
         if not self.use_dgq and not self.use_context_graph_refine:
