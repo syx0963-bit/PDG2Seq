@@ -58,12 +58,18 @@ class PDG2Seq_Dncoder(nn.Module):
         for _ in range(1, num_layers):
             self.PDG2Seq_cells.append(PDG2SeqCell(node_num, dim_out, dim_out, cheb_k, embed_dim, time_dim, args=args))
 
-    def forward(self, xt, init_state, node_embeddings):
+    def forward(self, xt, init_state, node_embeddings, periodic_context=None, context_valid=None):
         assert xt.shape[1] == self.node_num and xt.shape[2] == self.input_dim
         current_inputs = xt
         output_hidden = []
         for i in range(self.num_layers):
-            state = self.PDG2Seq_cells[i](current_inputs, init_state[i], [node_embeddings[0], node_embeddings[1], node_embeddings[2]])
+            state = self.PDG2Seq_cells[i](
+                current_inputs,
+                init_state[i],
+                [node_embeddings[0], node_embeddings[1], node_embeddings[2]],
+                periodic_context=periodic_context,
+                context_valid=context_valid
+            )
             output_hidden.append(state)
             current_inputs = state
         return current_inputs, output_hidden
@@ -85,6 +91,8 @@ class PDG2Seq(nn.Module):
         self.use_periodic_graph_context = args.use_periodic_context and (
             args.use_context_graph_refine or self.use_meta_reliable_graph
         )
+        self.use_periodic_consistency = getattr(args, 'use_periodic_consistency', False)
+        self.use_decoder_periodic_context = getattr(args, 'use_decoder_periodic_context', False)
         self.steps_per_day = args.steps_per_day
         self.steps_per_week = args.steps_per_week
         self.cl_decay_steps = args.lr_decay_step
@@ -164,10 +172,17 @@ class PDG2Seq(nn.Module):
         go = torch.zeros((source_traffic.shape[0], self.num_node, self.output_dim), device=source_traffic.device)
         out = []
         for t in range(self.horizon):
+            decoder_periodic_context = None
+            decoder_context_valid = None
+            if self.use_decoder_periodic_context and self.use_periodic_consistency:
+                decoder_periodic_context = traget[:, t, :, 1:2]
+                decoder_context_valid = traget[:, t, :, 2:3]
             state, ht_list = self.decoder(
                 go,
                 ht_list,
-                [node_embedding_de1[:, t, :], node_embedding_de2[:, t, :], self.node_embeddings1]
+                [node_embedding_de1[:, t, :], node_embedding_de2[:, t, :], self.node_embeddings1],
+                periodic_context=decoder_periodic_context,
+                context_valid=decoder_context_valid
             )
             go = self.proj(state)
             out.append(go)

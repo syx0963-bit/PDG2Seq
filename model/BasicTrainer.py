@@ -163,6 +163,7 @@ class Trainer(object):
         best_model = None
         best_test_model = None
         not_improved_count = 0
+        best_score = float('inf')
         best_loss = float('inf')
         best_test_loss = float('inf')
         vaild_loss = []
@@ -179,6 +180,7 @@ class Trainer(object):
 
             val_metrics = self.val_epoch(epoch, val_dataloader)
             val_epoch_loss = val_metrics['loss']
+            val_score = self._select_score(val_metrics)
             vaild_loss.append(val_epoch_loss)
 
             test_metrics = self.test_epoch(epoch, test_dataloader)
@@ -186,7 +188,8 @@ class Trainer(object):
             if train_epoch_loss > 1e6:
                 self.logger.warning('Gradient explosion detected. Ending...')
                 break
-            if val_epoch_loss < best_loss:
+            if val_score < best_score:
+                best_score = val_score
                 best_loss = val_epoch_loss
                 not_improved_count = 0
                 best_state = True
@@ -207,7 +210,7 @@ class Trainer(object):
                 best_test_model = copy.deepcopy(self.model.state_dict())
 
             self._log_epoch_progress(epoch, train_epoch_loss, val_metrics, test_metrics,
-                                     best_loss, best_test_loss, not_improved_count)
+                                     best_score, best_test_loss, not_improved_count)
 
             if (
                 not self.args.debug
@@ -256,20 +259,27 @@ class Trainer(object):
             'time': self._to_float(elapsed_time)
         }
 
+    def _select_score(self, metrics):
+        metric = getattr(self.args, 'select_metric', 'rmse')
+        if metric == 'hybrid':
+            return metrics['rmse'] + metrics['mae']
+        return metrics[metric]
+
     def _log_epoch_progress(self, epoch, train_loss, val_metrics, test_metrics,
-                            best_val_loss, best_test_loss, not_improved_count):
+                            best_val_score, best_test_loss, not_improved_count):
         current_lr = self.optimizer.param_groups[0]['lr']
         self.logger.info(
             'Epoch Progress {}/{} | lr: {:.8f} | train_loss: {:.6f} | '
             'val_loss: {:.6f}, val_MAE: {:.4f}, val_RMSE: {:.4f}, val_MAPE: {:.4f}%, val_CORR: {:.4f} | '
             'test_loss: {:.6f}, test_MAE: {:.4f}, test_RMSE: {:.4f}, test_MAPE: {:.4f}%, test_CORR: {:.4f} | '
-            'best_val_loss: {:.6f}, best_test_loss: {:.6f}, no_improve_epochs: {}'.format(
+            'select_metric: {}, best_val_score: {:.6f}, best_test_loss: {:.6f}, no_improve_epochs: {}'.format(
                 epoch, self.args.epochs, current_lr, train_loss,
                 val_metrics['loss'], val_metrics['mae'], val_metrics['rmse'],
                 val_metrics['mape'] * 100, val_metrics['corr'],
                 test_metrics['loss'], test_metrics['mae'], test_metrics['rmse'],
                 test_metrics['mape'] * 100, test_metrics['corr'],
-                best_val_loss, best_test_loss, not_improved_count
+                getattr(self.args, 'select_metric', 'rmse'),
+                best_val_score, best_test_loss, not_improved_count
             )
         )
 
@@ -299,9 +309,21 @@ class Trainer(object):
                     ",".join(["{:.4f}".format(w) for w in periodic_weights.view(-1).tolist()])
                 )
             )
+        calibration = None
+        if getattr(self.args, 'use_eval_calibration', True):
+            calibration = self._fit_eval_calibration(teacher, weights, periodic_weights)
+            if calibration is not None:
+                coef, feature_names = calibration
+                coef_mean = coef.mean(dim=(0, 1)).detach().cpu().tolist()
+                self.logger.info(
+                    "Validation calibration features: {}, mean coeffs: {}".format(
+                        ",".join(feature_names),
+                        ",".join(["{:.4f}".format(v) for v in coef_mean])
+                    )
+                )
         self.test_dgq_ensemble(
             self.model, teacher, weights, self.args, self.test_loader, self.scaler, self.logger,
-            periodic_weights=periodic_weights
+            periodic_weights=periodic_weights, calibration=calibration
         )
 
     def _should_use_dgq_ensemble(self):
@@ -416,9 +438,96 @@ class Trainer(object):
             weights.append(best_weight)
         return torch.tensor(weights, device=self.args.device).view(1, self.args.horizon, 1, 1)
 
+    def _build_ensemble_feature_batch(self, data, target, teacher, dgq_weights, periodic_weights=None):
+        label = target[..., :self.args.output_dim]
+        dgq_output = self.model(data, target)
+        teacher_output = teacher(data, target)
+        output = dgq_weights * dgq_output + (1.0 - dgq_weights) * teacher_output
+        periodic_ref = None
+        periodic_valid = None
+        if getattr(self.args, 'use_periodic_consistency', False) and target.shape[-1] >= 3:
+            periodic_ref = target[..., 1:2]
+            periodic_valid = target[..., 2:3]
+            if periodic_weights is not None:
+                periodic_output = (1.0 - periodic_weights) * output + periodic_weights * periodic_ref
+                output = periodic_valid * periodic_output + (1.0 - periodic_valid) * output
+
+        features = [
+            self.scaler.inverse_transform(output),
+            self.scaler.inverse_transform(dgq_output),
+            self.scaler.inverse_transform(teacher_output),
+            self.scaler.inverse_transform(data[:, -1:, :, :1]).expand(-1, self.args.horizon, -1, -1)
+        ]
+        if periodic_ref is not None and periodic_valid is not None:
+            periodic_real = self.scaler.inverse_transform(periodic_ref)
+            periodic_real = periodic_valid * periodic_real + (1.0 - periodic_valid) * features[0]
+            features.append(periodic_real)
+        features.append(torch.ones_like(features[0]))
+        return torch.cat(features, dim=-1), self.scaler.inverse_transform(label)
+
+    def _calibration_feature_names(self):
+        feature_names = ['ensemble', 'student', 'teacher', 'last']
+        if getattr(self.args, 'use_periodic_consistency', False):
+            feature_names.append('periodic')
+        feature_names.append('bias')
+        return feature_names
+
+    def _collect_ensemble_features(self, teacher, dgq_weights, data_loader, periodic_weights=None):
+        self.model.eval()
+        teacher.eval()
+        features = []
+        y_true = []
+        with torch.no_grad():
+            for data, target in data_loader:
+                batch_features, batch_true = self._build_ensemble_feature_batch(
+                    data, target, teacher, dgq_weights, periodic_weights=periodic_weights
+                )
+                features.append(batch_features.detach().cpu())
+                y_true.append(batch_true.detach().cpu())
+        return torch.cat(features, dim=0), torch.cat(y_true, dim=0), self._calibration_feature_names()
+
+    def _fit_eval_calibration(self, teacher, dgq_weights, periodic_weights=None):
+        feature_names = self._calibration_feature_names()
+        ridge = float(getattr(self.args, 'eval_calibration_ridge', 1.0e-3))
+        feature_dim = len(feature_names)
+        xtx = torch.zeros(self.args.horizon, self.args.num_nodes, feature_dim, feature_dim)
+        xty = torch.zeros(self.args.horizon, self.args.num_nodes, feature_dim)
+        self.model.eval()
+        teacher.eval()
+        with torch.no_grad():
+            for data, target in self.val_loader:
+                batch_features, batch_true = self._build_ensemble_feature_batch(
+                    data, target, teacher, dgq_weights, periodic_weights=periodic_weights
+                )
+                x = batch_features.detach().cpu()
+                y = batch_true.detach().cpu()
+                xtx += torch.einsum('bhnf,bhng->hnfg', x, x)
+                xty += torch.einsum('bhnf,bhno->hnf', x, y)
+
+        coeffs = []
+        eye = torch.eye(feature_dim)
+        for horizon_idx in range(self.args.horizon):
+            horizon_coeffs = []
+            for node_idx in range(self.args.num_nodes):
+                penalty = ridge * eye
+                penalty[-1, -1] = 0.0
+                try:
+                    coef = torch.linalg.solve(xtx[horizon_idx, node_idx] + penalty, xty[horizon_idx, node_idx])
+                except RuntimeError:
+                    coef = torch.linalg.pinv(xtx[horizon_idx, node_idx] + penalty).matmul(xty[horizon_idx, node_idx])
+                horizon_coeffs.append(coef)
+            coeffs.append(torch.stack(horizon_coeffs, dim=0))
+        coeffs = torch.stack(coeffs, dim=0).to(self.args.device)
+        return coeffs, feature_names
+
+    @staticmethod
+    def _apply_eval_calibration(features, calibration):
+        coeffs, _ = calibration
+        return torch.sum(features * coeffs.unsqueeze(0), dim=-1, keepdim=True)
+
     @staticmethod
     def test_dgq_ensemble(model, teacher, weights, args, data_loader, scaler, logger,
-                          periodic_weights=None):
+                          periodic_weights=None, calibration=None):
         model.eval()
         teacher.eval()
         y_pred = []
@@ -434,11 +543,34 @@ class Trainer(object):
                     periodic_valid = target[..., 2:3]
                     periodic_output = (1.0 - periodic_weights) * output + periodic_weights * periodic_ref
                     output = periodic_valid * periodic_output + (1.0 - periodic_valid) * output
-                y_true.append(label)
-                y_pred.append(output)
+                if calibration is None:
+                    y_true.append(label)
+                    y_pred.append(output)
+                else:
+                    has_periodic_ref = getattr(args, 'use_periodic_consistency', False) and target.shape[-1] >= 3
+                    periodic_ref = target[..., 1:2] if has_periodic_ref else None
+                    periodic_valid = target[..., 2:3] if has_periodic_ref else None
+                    feature_parts = [
+                        scaler.inverse_transform(output),
+                        scaler.inverse_transform(dgq_output),
+                        scaler.inverse_transform(teacher_output),
+                        scaler.inverse_transform(data[:, -1:, :, :1]).expand(-1, args.horizon, -1, -1)
+                    ]
+                    if periodic_ref is not None and periodic_valid is not None:
+                        periodic_real = scaler.inverse_transform(periodic_ref)
+                        periodic_real = periodic_valid * periodic_real + (1.0 - periodic_valid) * feature_parts[0]
+                        feature_parts.append(periodic_real)
+                    feature_parts.append(torch.ones_like(feature_parts[0]))
+                    features = torch.cat(feature_parts, dim=-1)
+                    y_pred.append(Trainer._apply_eval_calibration(features, calibration))
+                    y_true.append(scaler.inverse_transform(label))
 
-        y_pred = scaler.inverse_transform(torch.cat(y_pred, dim=0))
-        y_true = scaler.inverse_transform(torch.cat(y_true, dim=0))
+        if calibration is None:
+            y_pred = scaler.inverse_transform(torch.cat(y_pred, dim=0))
+            y_true = scaler.inverse_transform(torch.cat(y_true, dim=0))
+        else:
+            y_pred = torch.cat(y_pred, dim=0)
+            y_true = torch.cat(y_true, dim=0)
         for t in range(y_true.shape[1]):
             mae, rmse, mape, _, corr = All_Metrics(y_pred[:, t, ...], y_true[:, t, ...],
                                                    args.mae_thresh, args.mape_thresh)

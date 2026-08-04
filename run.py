@@ -107,6 +107,11 @@ args.add_argument('--use_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
 args.add_argument('--context_graph_lambda', default=0.05, type=float)
 args.add_argument('--context_graph_dim', default=16, type=int)
+args.add_argument('--use_signal_decouple', default=False, type=str_to_bool)
+args.add_argument('--signal_decouple_hidden', default=32, type=int)
+args.add_argument('--signal_diffusion_bias', default=1.8, type=float)
+args.add_argument('--signal_fuse_diffusion_bias', default=1.2, type=float)
+args.add_argument('--signal_inherent_scale', default=0.2, type=float)
 args.add_argument('--use_meta_reliable_graph', default=False, type=str_to_bool)
 args.add_argument('--meta_state_dim', default=32, type=int)
 args.add_argument('--meta_graph_modes', default=4, type=int)
@@ -119,6 +124,9 @@ args.add_argument('--periodic_week_steps', default=2016, type=int)
 args.add_argument('--context_temperature', default=1.0, type=float)
 args.add_argument('--use_periodic_consistency', default=False, type=str_to_bool)
 args.add_argument('--periodic_consistency_eval', default=True, type=str_to_bool)
+args.add_argument('--use_decoder_periodic_context', default=False, type=str_to_bool)
+args.add_argument('--use_eval_calibration', default=True, type=str_to_bool)
+args.add_argument('--eval_calibration_ridge', default=1.0e-3, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--seed', default=config['train']['seed'], type=int)
@@ -135,6 +143,7 @@ args.add_argument('--early_stop_patience', default=config['train']['early_stop_p
 args.add_argument('--grad_norm', default=config['train']['grad_norm'], type=str_to_bool)
 args.add_argument('--max_grad_norm', default=config['train']['max_grad_norm'], type=int)
 args.add_argument('--save_every', default=0, type=int)
+args.add_argument('--select_metric', default='rmse', choices=['loss', 'mae', 'rmse', 'mape', 'hybrid'])
 args.add_argument('--teacher_forcing', default=False, type=str_to_bool)
 args.add_argument('--real_value', default=config['train']['real_value'], type=str_to_bool, help = 'use real value for loss calculation')
 #test
@@ -152,6 +161,8 @@ if args.use_meta_reliable_graph:
     args.use_periodic_context = True
     args.use_context_graph_refine = True
     args.use_periodic_consistency = True
+    args.use_signal_decouple = True
+    args.use_decoder_periodic_context = True
 if args.use_dgq and args.dgq_eval_ensemble and not args.dgq_teacher_path:
     args.dgq_teacher_path = './pre-trained/{}.pth'.format(args.dataset)
 
@@ -228,6 +239,10 @@ def build_innovation_name(args):
         names.append('PeriodicContext')
     if args.use_context_graph_refine:
         names.append('ContextGraphRefine')
+    if args.use_signal_decouple:
+        names.append('SignalDecouple')
+        if args.use_decoder_periodic_context:
+            names.append('DecoderPeriodicContext')
     if args.use_meta_reliable_graph:
         names.append('MetaReliableGraph')
     if args.use_periodic_consistency:
