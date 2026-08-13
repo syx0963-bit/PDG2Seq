@@ -347,10 +347,16 @@ class Trainer(object):
             return None
 
         teacher_args = copy.copy(self.args)
-        teacher_args.use_dgq = False
-        teacher_args.use_periodic_context = False
-        teacher_args.use_context_graph_refine = False
-        teacher_args.use_meta_reliable_graph = False
+        for flag in (
+            'use_dgq',
+            'use_periodic_context',
+            'use_context_graph_refine',
+            'use_signal_decouple',
+            'use_meta_reliable_graph',
+            'use_periodic_consistency',
+            'use_decoder_periodic_context',
+        ):
+            setattr(teacher_args, flag, False)
         teacher = PDG2Seq(teacher_args).to(self.args.device)
         state = torch.load(teacher_path, map_location=self.args.device)
         if isinstance(state, dict) and 'state_dict' in state:
@@ -377,20 +383,35 @@ class Trainer(object):
 
         weights = []
         grid = torch.linspace(-1.0, 2.0, 301)
+        metric = getattr(self.args, 'select_metric', 'rmse')
         for horizon_idx in range(self.args.horizon):
             best_weight = 1.0
-            best_mae = float('inf')
+            best_score = float('inf')
             dgq_h = dgq_pred[:, horizon_idx]
             teacher_h = teacher_pred[:, horizon_idx]
             true_h = y_true[:, horizon_idx]
             for weight in grid:
                 blended = weight * dgq_h + (1.0 - weight) * teacher_h
-                mae = torch.mean(torch.abs(blended - true_h)).item()
-                if mae < best_mae:
-                    best_mae = mae
+                score = self._ensemble_score(blended, true_h, metric)
+                if score < best_score:
+                    best_score = score
                     best_weight = float(weight.item())
             weights.append(best_weight)
         return torch.tensor(weights, device=self.args.device).view(1, self.args.horizon, 1, 1)
+
+    @staticmethod
+    def _ensemble_score(pred, true, metric):
+        err = pred - true
+        if metric == 'rmse':
+            return torch.sqrt(torch.mean(err * err)).item()
+        if metric == 'mape':
+            denom = true.abs().clamp_min(1.0e-5)
+            return torch.mean(torch.abs(err) / denom).item()
+        if metric == 'hybrid':
+            mae = torch.mean(torch.abs(err))
+            rmse = torch.sqrt(torch.mean(err * err))
+            return (mae + rmse).item()
+        return torch.mean(torch.abs(err)).item()
 
     def _fit_periodic_consistency_weights(self, teacher, dgq_weights):
         self.model.eval()

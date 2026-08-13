@@ -113,6 +113,7 @@ args.add_argument('--signal_diffusion_bias', default=1.8, type=float)
 args.add_argument('--signal_fuse_diffusion_bias', default=1.2, type=float)
 args.add_argument('--signal_inherent_scale', default=0.2, type=float)
 args.add_argument('--use_meta_reliable_graph', default=False, type=str_to_bool)
+args.add_argument('--meta_auto_features', default=True, type=str_to_bool)
 args.add_argument('--meta_state_dim', default=32, type=int)
 args.add_argument('--meta_graph_modes', default=4, type=int)
 args.add_argument('--meta_graph_alpha', default=0.65, type=float)
@@ -149,6 +150,7 @@ args.add_argument('--real_value', default=config['train']['real_value'], type=st
 #test
 args.add_argument('--mae_thresh', default=config['test']['mae_thresh'], type=optional_float)
 args.add_argument('--mape_thresh', default=config['test']['mape_thresh'], type=float)
+args.add_argument('--test_model_path', default='', type=str)
 #log
 args.add_argument('-h', '--help', action='help', help='show this help message and exit')
 args.add_argument('--log_dir', default='./', type=str)
@@ -156,7 +158,7 @@ args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
-if args.use_meta_reliable_graph:
+if args.use_meta_reliable_graph and args.meta_auto_features:
     args.use_dgq = True
     args.use_periodic_context = True
     args.use_context_graph_refine = True
@@ -266,8 +268,12 @@ trainer = Trainer(model, loss, optimizer, train_loader, val_loader, test_loader,
 if args.mode == 'train':
     trainer.train()
 elif args.mode == 'test':
-    model.load_state_dict(torch.load('./pre-trained/{}.pth'.format(args.dataset), map_location=args.device))
-    print("Load saved model")
-    trainer.test(model, trainer.args, test_loader, scaler, trainer.logger)
+    test_model_path = args.test_model_path or './pre-trained/{}.pth'.format(args.dataset)
+    state = torch.load(test_model_path, map_location=args.device)
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    model.load_state_dict(state)
+    print("Load saved model from {}".format(test_model_path))
+    trainer._test_or_dgq_ensemble("This is test_model")
 else:
     raise ValueError
