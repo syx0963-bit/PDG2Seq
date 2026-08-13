@@ -53,6 +53,30 @@ def masked_mae_loss(scaler, mask_value):
         return mae
     return loss
 
+
+def mape_aware_mae_loss(scaler, mape_weight=0.05):
+    def loss(preds, labels):
+        mae = torch.mean(torch.abs(preds - labels))
+        if scaler is None:
+            real_preds = preds
+            real_labels = labels
+        else:
+            real_preds = scaler.inverse_transform(preds)
+            real_labels = scaler.inverse_transform(labels)
+        denom = real_labels.abs().clamp_min(1.0)
+        mape = torch.mean(torch.abs(real_preds - real_labels) / denom)
+        return mae + mape_weight * mape
+    return loss
+
+
+def mae_rmse_loss(rmse_weight=0.25):
+    def loss(preds, labels):
+        err = preds - labels
+        mae = torch.mean(torch.abs(err))
+        rmse = torch.sqrt(torch.mean(err * err) + 1.0e-8)
+        return mae + rmse_weight * rmse
+    return loss
+
 # Mode = 'train'
 # DEBUG = 'True'
 # DATASET = 'PEMSD3'      #PEMSD4 or PEMSD8
@@ -130,6 +154,8 @@ args.add_argument('--use_eval_calibration', default=True, type=str_to_bool)
 args.add_argument('--eval_calibration_ridge', default=1.0e-3, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
+args.add_argument('--mape_loss_weight', default=0.05, type=float)
+args.add_argument('--rmse_loss_weight', default=0.25, type=float)
 args.add_argument('--seed', default=config['train']['seed'], type=int)
 args.add_argument('--batch_size', default=config['train']['batch_size'], type=int)
 args.add_argument('--epochs', default=config['train']['epochs'], type=int)
@@ -144,7 +170,8 @@ args.add_argument('--early_stop_patience', default=config['train']['early_stop_p
 args.add_argument('--grad_norm', default=config['train']['grad_norm'], type=str_to_bool)
 args.add_argument('--max_grad_norm', default=config['train']['max_grad_norm'], type=int)
 args.add_argument('--save_every', default=0, type=int)
-args.add_argument('--select_metric', default='rmse', choices=['loss', 'mae', 'rmse', 'mape', 'hybrid'])
+args.add_argument('--select_metric', default='balanced', choices=['loss', 'mae', 'rmse', 'mape', 'hybrid', 'balanced'])
+args.add_argument('--train_init_path', default='', type=str)
 args.add_argument('--teacher_forcing', default=False, type=str_to_bool)
 args.add_argument('--real_value', default=config['train']['real_value'], type=str_to_bool, help = 'use real value for loss calculation')
 #test
@@ -184,6 +211,12 @@ for p in model.parameters():
         nn.init.xavier_uniform_(p)
     else:
         nn.init.uniform_(p)
+if args.mode == 'train' and args.train_init_path:
+    state = torch.load(args.train_init_path, map_location=args.device)
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    model.load_state_dict(state)
+    print("Initialize training model from {}".format(args.train_init_path))
 print_model_parameters(model, only_num=False)
 
 #load dataset
@@ -199,6 +232,10 @@ elif args.loss_func == 'mae':
     loss = torch.nn.L1Loss().to(args.device)
 elif args.loss_func == 'mse':
     loss = torch.nn.MSELoss().to(args.device)
+elif args.loss_func == 'mape_aware_mae':
+    loss = mape_aware_mae_loss(scaler, args.mape_loss_weight)
+elif args.loss_func == 'mae_rmse':
+    loss = mae_rmse_loss(args.rmse_loss_weight)
 else:
     raise ValueError
 

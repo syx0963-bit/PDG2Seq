@@ -263,6 +263,8 @@ class Trainer(object):
         metric = getattr(self.args, 'select_metric', 'rmse')
         if metric == 'hybrid':
             return metrics['rmse'] + metrics['mae']
+        if metric == 'balanced':
+            return metrics['rmse'] + metrics['mae'] + 120.0 * metrics['mape']
         return metrics[metric]
 
     def _log_epoch_progress(self, epoch, train_loss, val_metrics, test_metrics,
@@ -311,12 +313,16 @@ class Trainer(object):
             )
         calibration = None
         if getattr(self.args, 'use_eval_calibration', True):
-            calibration = self._fit_eval_calibration(teacher, weights, periodic_weights)
+            calibration = self._select_eval_calibration(teacher, weights, periodic_weights)
             if calibration is not None:
-                coef, feature_names = calibration
-                coef_mean = coef.mean(dim=(0, 1)).detach().cpu().tolist()
+                coef, feature_names, calibration_name, val_metrics = calibration
+                if coef.dim() == 3:
+                    coef_mean = coef.mean(dim=(0, 1)).detach().cpu().tolist()
+                else:
+                    coef_mean = coef.mean(dim=0).detach().cpu().tolist()
                 self.logger.info(
-                    "Validation calibration features: {}, mean coeffs: {}".format(
+                    "Validation calibration: {}, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}%, features: {}, mean coeffs: {}".format(
+                        calibration_name, val_metrics[1], val_metrics[0], val_metrics[2] * 100,
                         ",".join(feature_names),
                         ",".join(["{:.4f}".format(v) for v in coef_mean])
                     )
@@ -411,6 +417,12 @@ class Trainer(object):
             mae = torch.mean(torch.abs(err))
             rmse = torch.sqrt(torch.mean(err * err))
             return (mae + rmse).item()
+        if metric == 'balanced':
+            mae = torch.mean(torch.abs(err))
+            rmse = torch.sqrt(torch.mean(err * err))
+            denom = true.abs().clamp_min(1.0e-5)
+            mape = torch.mean(torch.abs(err) / denom)
+            return (rmse + mae + 120.0 * mape).item()
         return torch.mean(torch.abs(err)).item()
 
     def _fit_periodic_consistency_weights(self, teacher, dgq_weights):
@@ -510,6 +522,10 @@ class Trainer(object):
     def _fit_eval_calibration(self, teacher, dgq_weights, periodic_weights=None):
         feature_names = self._calibration_feature_names()
         ridge = float(getattr(self.args, 'eval_calibration_ridge', 1.0e-3))
+        return self._fit_node_calibration_from_loader(teacher, dgq_weights, periodic_weights, ridge), feature_names
+
+    def _fit_node_calibration_from_loader(self, teacher, dgq_weights, periodic_weights, ridge):
+        feature_names = self._calibration_feature_names()
         feature_dim = len(feature_names)
         xtx = torch.zeros(self.args.horizon, self.args.num_nodes, feature_dim, feature_dim)
         xty = torch.zeros(self.args.horizon, self.args.num_nodes, feature_dim)
@@ -524,26 +540,141 @@ class Trainer(object):
                 y = batch_true.detach().cpu()
                 xtx += torch.einsum('bhnf,bhng->hnfg', x, x)
                 xty += torch.einsum('bhnf,bhno->hnf', x, y)
+        return self._solve_node_calibration(xtx, xty, ridge)
 
-        coeffs = []
+    @staticmethod
+    def _solve_node_calibration(xtx, xty, ridge):
+        feature_dim = xtx.shape[-1]
+        penalty = ridge * torch.eye(feature_dim, device=xtx.device, dtype=xtx.dtype)
+        penalty[-1, -1] = 0.0
+        matrix = xtx + penalty.view(1, 1, feature_dim, feature_dim)
+        rhs = xty.unsqueeze(-1)
+        try:
+            return torch.linalg.solve(matrix, rhs).squeeze(-1)
+        except RuntimeError:
+            return torch.matmul(torch.linalg.pinv(matrix), rhs).squeeze(-1)
+
+    @staticmethod
+    def _fit_node_calibration(features, true, ridge, sample_weights=None):
+        x = features
+        y = true
+        if sample_weights is not None:
+            w = torch.sqrt(sample_weights.clamp_min(1.0e-6))
+            x = x * w
+            y = y * w
+        xtx = torch.einsum('bhnf,bhng->hnfg', x, x)
+        xty = torch.einsum('bhnf,bhno->hnf', x, y)
+        return Trainer._solve_node_calibration(xtx, xty, ridge)
+
+    @staticmethod
+    def _fit_horizon_calibration(features, true, ridge, sample_weights=None):
+        horizon = features.shape[1]
+        feature_dim = features.shape[3]
+        x = features.reshape(features.shape[0], horizon, -1, feature_dim)
+        y = true.reshape(true.shape[0], horizon, -1, true.shape[3])
+        if sample_weights is not None:
+            w = torch.sqrt(sample_weights.reshape(true.shape[0], horizon, -1, true.shape[3]).clamp_min(1.0e-6))
+            x = x * w
+            y = y * w
+        xtx = torch.einsum('bhnf,bhng->hfg', x, x)
+        xty = torch.einsum('bhnf,bhno->hf', x, y)
         eye = torch.eye(feature_dim)
-        for horizon_idx in range(self.args.horizon):
-            horizon_coeffs = []
-            for node_idx in range(self.args.num_nodes):
-                penalty = ridge * eye
-                penalty[-1, -1] = 0.0
-                try:
-                    coef = torch.linalg.solve(xtx[horizon_idx, node_idx] + penalty, xty[horizon_idx, node_idx])
-                except RuntimeError:
-                    coef = torch.linalg.pinv(xtx[horizon_idx, node_idx] + penalty).matmul(xty[horizon_idx, node_idx])
-                horizon_coeffs.append(coef)
-            coeffs.append(torch.stack(horizon_coeffs, dim=0))
-        coeffs = torch.stack(coeffs, dim=0).to(self.args.device)
-        return coeffs, feature_names
+        penalty = ridge * eye
+        penalty[-1, -1] = 0.0
+        matrix = xtx + penalty.view(1, feature_dim, feature_dim)
+        rhs = xty.unsqueeze(-1)
+        try:
+            return torch.linalg.solve(matrix, rhs).squeeze(-1)
+        except RuntimeError:
+            return torch.matmul(torch.linalg.pinv(matrix), rhs).squeeze(-1)
+
+    @staticmethod
+    def _apply_horizon_calibration(features, calibration):
+        coeffs = calibration[0]
+        return torch.sum(features * coeffs.view(1, coeffs.shape[0], 1, coeffs.shape[1]), dim=-1, keepdim=True)
+
+    @staticmethod
+    def _metric_tuple(pred, true, args):
+        mae, rmse, mape, _, _ = All_Metrics(pred, true, args.mae_thresh, args.mape_thresh)
+        return float(mae), float(rmse), float(mape)
+
+    @staticmethod
+    def _calibration_selection_score(metrics):
+        mae, rmse, mape = metrics
+        return rmse + mae + 120.0 * mape
+
+    def _select_eval_calibration(self, teacher, dgq_weights, periodic_weights=None):
+        features, y_true, feature_names = self._collect_ensemble_features(
+            teacher, dgq_weights, self.val_loader, periodic_weights=periodic_weights
+        )
+        base_pred = features[..., 0:1]
+        base_metrics = self._metric_tuple(base_pred, y_true, self.args)
+        best_score = self._calibration_selection_score(base_metrics)
+        best = None
+
+        sample_weights = (1.0 / y_true.abs().clamp_min(1.0)).clamp_max(0.2)
+        ridge_values = getattr(self.args, 'eval_calibration_ridge_grid', None)
+        if ridge_values is None:
+            ridge_values = (1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 1.0e-1)
+
+        for ridge in ridge_values:
+            node_coeffs = self._fit_node_calibration(features, y_true, float(ridge))
+            calibration = (node_coeffs, feature_names, 'node_ridge_{}'.format(ridge), base_metrics)
+            pred = self._apply_eval_calibration(features, calibration)
+            metrics = self._metric_tuple(pred, y_true, self.args)
+            score = self._calibration_selection_score(metrics)
+            if score < best_score:
+                best_score = score
+                best = (node_coeffs.to(self.args.device), feature_names, 'node_ridge_{}'.format(ridge), metrics)
+
+            horizon_coeffs = self._fit_horizon_calibration(features, y_true, float(ridge))
+            calibration = (horizon_coeffs, feature_names, 'horizon_ridge_{}'.format(ridge), base_metrics)
+            pred = self._apply_horizon_calibration(features, calibration)
+            metrics = self._metric_tuple(pred, y_true, self.args)
+            score = self._calibration_selection_score(metrics)
+            if score < best_score:
+                best_score = score
+                best = (horizon_coeffs.to(self.args.device), feature_names, 'horizon_ridge_{}'.format(ridge), metrics)
+
+            weighted_node_coeffs = self._fit_node_calibration(features, y_true, float(ridge), sample_weights=sample_weights)
+            calibration = (
+                weighted_node_coeffs, feature_names, 'mape_weighted_node_ridge_{}'.format(ridge), base_metrics
+            )
+            pred = self._apply_eval_calibration(features, calibration)
+            metrics = self._metric_tuple(pred, y_true, self.args)
+            score = self._calibration_selection_score(metrics)
+            if score < best_score:
+                best_score = score
+                best = (
+                    weighted_node_coeffs.to(self.args.device), feature_names,
+                    'mape_weighted_node_ridge_{}'.format(ridge), metrics
+                )
+
+            weighted_coeffs = self._fit_horizon_calibration(features, y_true, float(ridge), sample_weights=sample_weights)
+            calibration = (
+                weighted_coeffs, feature_names,
+                'mape_weighted_horizon_ridge_{}'.format(ridge), base_metrics
+            )
+            pred = self._apply_horizon_calibration(features, calibration)
+            metrics = self._metric_tuple(pred, y_true, self.args)
+            score = self._calibration_selection_score(metrics)
+            if score < best_score:
+                best_score = score
+                best = (
+                    weighted_coeffs.to(self.args.device), feature_names,
+                    'mape_weighted_horizon_ridge_{}'.format(ridge), metrics
+                )
+
+        if best is not None:
+            return best
+
+        return None
 
     @staticmethod
     def _apply_eval_calibration(features, calibration):
-        coeffs, _ = calibration
+        coeffs = calibration[0]
+        if coeffs.dim() == 2:
+            return Trainer._apply_horizon_calibration(features, calibration)
         return torch.sum(features * coeffs.unsqueeze(0), dim=-1, keepdim=True)
 
     @staticmethod

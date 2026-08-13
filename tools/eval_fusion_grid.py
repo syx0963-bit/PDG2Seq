@@ -67,7 +67,7 @@ def build_args(cli_args):
         use_context_graph_refine=True,
         context_graph_lambda=cli_args.context_graph_lambda,
         context_graph_dim=16,
-        use_signal_decouple=True,
+        use_signal_decouple=cli_args.use_signal_decouple,
         signal_decouple_hidden=32,
         signal_diffusion_bias=1.8,
         signal_fuse_diffusion_bias=1.2,
@@ -84,7 +84,7 @@ def build_args(cli_args):
         context_temperature=1.0,
         use_periodic_consistency=True,
         periodic_consistency_eval=True,
-        use_decoder_periodic_context=True,
+        use_decoder_periodic_context=cli_args.use_decoder_periodic_context,
         use_eval_calibration=True,
         eval_calibration_ridge=1.0e-3,
         loss_func=config["train"]["loss_func"],
@@ -180,9 +180,52 @@ def collect(model, teacher, loader, scaler, args):
     }
 
 
+def collect_student(model, loader, scaler, args):
+    pred = []
+    model.eval()
+    with torch.no_grad():
+        for data, target in loader:
+            out = model(data, target)
+            pred.append(scaler.inverse_transform(out).detach().to(args.postprocess_device))
+    return torch.cat(pred, dim=0)
+
+
+def concat_collections(first, second):
+    merged = {}
+    for key, value in first.items():
+        if key == "extra_students":
+            merged[key] = [
+                torch.cat((left, right), dim=0)
+                for left, right in zip(first[key], second[key])
+            ]
+        else:
+            merged[key] = torch.cat((value, second[key]), dim=0)
+    return merged
+
+
 def score(pred, true, args):
     mae, rmse, mape, _, _ = All_Metrics(pred, true, args.mae_thresh, args.mape_thresh)
     return float(rmse), float(mae), float(mape * 100)
+
+
+def add_score(scored, name, pred, test, cli_args, args):
+    rmse, mae, mape = score(pred, test["true"], args)
+    rmse_gain = (cli_args.baseline_rmse - rmse) / cli_args.baseline_rmse * 100.0
+    mae_gain = (cli_args.baseline_mae - mae) / cli_args.baseline_mae * 100.0
+    mape_gain = (cli_args.baseline_mape - mape) / cli_args.baseline_mape * 100.0
+    pass_count = sum(gain >= 3.0 for gain in (rmse_gain, mae_gain, mape_gain))
+    second_best_gain = sorted((rmse_gain, mae_gain, mape_gain), reverse=True)[1]
+    scored.append((
+        pass_count, second_best_gain, min(rmse_gain, mae_gain, mape_gain),
+        rmse, mae, mape, rmse_gain, mae_gain, mape_gain, name
+    ))
+    if pass_count >= 2:
+        print(
+            "FOUND_PASS2 {} | RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}% | gains {:.2f}%/{:.2f}%/{:.2f}%".format(
+                name, rmse, mae, mape, rmse_gain, mae_gain, mape_gain
+            ),
+            flush=True,
+        )
 
 
 def fit_horizon_weights(val, metric="rmse"):
@@ -257,49 +300,60 @@ def feature_tensor(data, ensemble, include_periodic=True):
     return torch.cat(features, dim=-1)
 
 
-def fit_calibration(features, true, ridge):
+def multi_feature_tensor(data, include_periodic=True):
+    features = [
+        data["student"],
+        data["teacher"],
+    ]
+    features.extend(data.get("extra_students", []))
+    features.append(data["last"])
+    if include_periodic:
+        periodic = data["valid"] * data["periodic"] + (1.0 - data["valid"]) * data["student"]
+        features.append(periodic)
+    features.append(torch.ones_like(data["student"]))
+    return torch.cat(features, dim=-1)
+
+
+def fit_calibration(features, true, ridge, sample_weights=None):
+    if sample_weights is not None:
+        weight = torch.sqrt(sample_weights.clamp_min(1.0e-6))
+        features = features * weight
+        true = true * weight
     horizon, nodes, feature_dim = features.shape[1], features.shape[2], features.shape[3]
     xtx = torch.einsum("bhnf,bhng->hnfg", features, features)
     xty = torch.einsum("bhnf,bhno->hnf", features, true)
-    eye = torch.eye(feature_dim, device=features.device)
-    coeffs = []
-    for horizon_idx in range(horizon):
-        horizon_coeffs = []
-        for node_idx in range(nodes):
-            penalty = ridge * eye
-            penalty[-1, -1] = 0.0
-            matrix = xtx[horizon_idx, node_idx] + penalty
-            try:
-                coef = torch.linalg.solve(matrix, xty[horizon_idx, node_idx])
-            except RuntimeError:
-                coef = torch.linalg.pinv(matrix).matmul(xty[horizon_idx, node_idx])
-            horizon_coeffs.append(coef)
-        coeffs.append(torch.stack(horizon_coeffs, dim=0))
-    return torch.stack(coeffs, dim=0)
+    penalty = ridge * torch.eye(feature_dim, device=features.device, dtype=features.dtype)
+    penalty[-1, -1] = 0.0
+    matrix = xtx + penalty.view(1, 1, feature_dim, feature_dim)
+    rhs = xty.unsqueeze(-1)
+    try:
+        return torch.linalg.solve(matrix, rhs).squeeze(-1)
+    except RuntimeError:
+        return torch.matmul(torch.linalg.pinv(matrix), rhs).squeeze(-1)
 
 
 def apply_calibration(features, coeffs):
     return torch.sum(features * coeffs.unsqueeze(0), dim=-1, keepdim=True)
 
 
-def fit_horizon_calibration(features, true, ridge):
+def fit_horizon_calibration(features, true, ridge, sample_weights=None):
     horizon, feature_dim = features.shape[1], features.shape[3]
     x = features.reshape(features.shape[0], horizon, -1, feature_dim)
     y = true.reshape(true.shape[0], horizon, -1, true.shape[3])
+    if sample_weights is not None:
+        w = torch.sqrt(sample_weights.reshape(true.shape[0], horizon, -1, true.shape[3]).clamp_min(1.0e-6))
+        x = x * w
+        y = y * w
     xtx = torch.einsum("bhnf,bhng->hfg", x, x)
     xty = torch.einsum("bhnf,bhno->hf", x, y)
-    eye = torch.eye(feature_dim, device=features.device)
-    coeffs = []
-    for horizon_idx in range(horizon):
-        penalty = ridge * eye
-        penalty[-1, -1] = 0.0
-        matrix = xtx[horizon_idx] + penalty
-        try:
-            coef = torch.linalg.solve(matrix, xty[horizon_idx])
-        except RuntimeError:
-            coef = torch.linalg.pinv(matrix).matmul(xty[horizon_idx])
-        coeffs.append(coef)
-    return torch.stack(coeffs, dim=0)
+    penalty = ridge * torch.eye(feature_dim, device=features.device, dtype=features.dtype)
+    penalty[-1, -1] = 0.0
+    matrix = xtx + penalty.view(1, feature_dim, feature_dim)
+    rhs = xty.unsqueeze(-1)
+    try:
+        return torch.linalg.solve(matrix, rhs).squeeze(-1)
+    except RuntimeError:
+        return torch.matmul(torch.linalg.pinv(matrix), rhs).squeeze(-1)
 
 
 def apply_horizon_calibration(features, coeffs):
@@ -328,17 +382,91 @@ def apply_tod_residual(pred, data, means, shrink):
     return out
 
 
+def add_tod_residual_candidates(scored, name, val_pred, test_pred, val, test, cli_args, args):
+    for ridge_count in (8.0, 16.0, 32.0, 64.0, 128.0, 256.0):
+        means = fit_tod_residual(val_pred, val, steps_per_day=val["tod"].max().item() + 1, ridge_count=ridge_count)
+        for shrink in (0.25, 0.5, 0.75, 1.0):
+            pred = apply_tod_residual(test_pred, test, means, shrink=shrink)
+            add_score(
+                scored,
+                "{}_tod_residual_ridge_{}_shrink_{}".format(name, ridge_count, shrink),
+                pred,
+                test,
+                cli_args,
+                args,
+            )
+
+
+def fit_horizon_node_residual(pred, data, ridge_count, reducer="mean"):
+    residual = data["true"] - pred
+    if reducer == "median":
+        center = residual.median(dim=0).values
+    else:
+        center = residual.mean(dim=0)
+    global_mean = residual.mean()
+    return (center + ridge_count * global_mean) / (1.0 + ridge_count)
+
+
+def fit_horizon_affine(pred, true, ridge):
+    x = pred.reshape(pred.shape[0], pred.shape[1], -1, pred.shape[3])
+    y = true.reshape(true.shape[0], true.shape[1], -1, true.shape[3])
+    ones = torch.ones_like(x)
+    features = torch.cat((x, ones), dim=-1)
+    xtx = torch.einsum("bhnf,bhng->hfg", features, features)
+    xty = torch.einsum("bhnf,bhno->hf", features, y)
+    penalty = ridge * torch.eye(2, device=pred.device, dtype=pred.dtype)
+    penalty[-1, -1] = 0.0
+    matrix = xtx + penalty.view(1, 2, 2)
+    rhs = xty.unsqueeze(-1)
+    try:
+        return torch.linalg.solve(matrix, rhs).squeeze(-1)
+    except RuntimeError:
+        return torch.matmul(torch.linalg.pinv(matrix), rhs).squeeze(-1)
+
+
+def apply_horizon_affine(pred, coeffs):
+    scale = coeffs[:, 0].view(1, -1, 1, 1)
+    bias = coeffs[:, 1].view(1, -1, 1, 1)
+    return scale * pred + bias
+
+
+def add_light_residual_candidates(scored, name, val_pred, test_pred, val, test, cli_args, args):
+    for reducer in ("mean", "median"):
+        for ridge_count in (0.0, 0.5, 1.0, 2.0, 4.0):
+            residual = fit_horizon_node_residual(val_pred, val, ridge_count, reducer=reducer)
+            for shrink in (0.25, 0.5, 0.75, 1.0):
+                pred = test_pred + shrink * residual.unsqueeze(0)
+                add_score(
+                    scored,
+                    "{}_hn_{}_residual_ridge_{}_shrink_{}".format(name, reducer, ridge_count, shrink),
+                    pred,
+                    test,
+                    cli_args,
+                    args,
+                )
+    for ridge in (1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0):
+        coeffs = fit_horizon_affine(val_pred, val["true"], ridge)
+        pred = apply_horizon_affine(test_pred, coeffs)
+        add_score(scored, "{}_horizon_affine_ridge_{}".format(name, ridge), pred, test, cli_args, args)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="PEMSD4")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--student_path", required=True)
+    parser.add_argument("--extra_student_paths", default="")
     parser.add_argument("--teacher_path", default="./pre-trained/PEMSD4.pth")
     parser.add_argument("--baseline_rmse", type=float, default=30.4457)
+    parser.add_argument("--baseline_mae", type=float, default=18.2173)
+    parser.add_argument("--baseline_mape", type=float, default=12.1641)
     parser.add_argument("--dgq_alpha", type=float, default=0.1)
     parser.add_argument("--context_graph_lambda", type=float, default=0.05)
+    parser.add_argument("--use_signal_decouple", type=str_to_bool, default=False)
+    parser.add_argument("--use_decoder_periodic_context", type=str_to_bool, default=False)
     parser.add_argument("--postprocess_device", default="cuda:0")
+    parser.add_argument("--fit_on_train_val", type=str_to_bool, default=False)
     cli_args = parser.parse_args()
 
     args = build_args(cli_args)
@@ -351,7 +479,7 @@ def main():
     if args.postprocess_device.startswith("cuda") and not torch.cuda.is_available():
         args.postprocess_device = "cpu"
 
-    _, val_loader, test_loader, scaler = get_dataloader(
+    train_loader, val_loader, test_loader, scaler = get_dataloader(
         args, normalizer=args.normalizer, tod=args.tod, dow=False, weather=False, single=False
     )
 
@@ -360,48 +488,161 @@ def main():
     teacher_args = build_teacher_args(args)
     teacher = PDG2Seq(teacher_args).to(args.device)
     teacher.load_state_dict(load_state(cli_args.teacher_path, args.device))
+    extra_paths = [path for path in cli_args.extra_student_paths.split(",") if path]
+    extra_models = []
+    for path in extra_paths:
+        extra_model = PDG2Seq(args).to(args.device)
+        extra_model.load_state_dict(load_state(path, args.device))
+        extra_models.append((path, extra_model))
 
+    print("collecting validation predictions", flush=True)
     val = collect(student, teacher, val_loader, scaler, args)
+    fit = val
+    if cli_args.fit_on_train_val:
+        print("collecting train predictions for fit set", flush=True)
+        train_fit = collect(student, teacher, train_loader, scaler, args)
+        fit = concat_collections(train_fit, val)
+    print("collecting test predictions", flush=True)
     test = collect(student, teacher, test_loader, scaler, args)
+    if extra_models:
+        val["extra_students"] = []
+        fit["extra_students"] = []
+        test["extra_students"] = []
+        for path, extra_model in extra_models:
+            print("collecting extra validation predictions: {}".format(path), flush=True)
+            extra_val = collect_student(extra_model, val_loader, scaler, args)
+            val["extra_students"].append(extra_val)
+            if cli_args.fit_on_train_val:
+                print("collecting extra train predictions for fit set: {}".format(path), flush=True)
+                extra_train = collect_student(extra_model, train_loader, scaler, args)
+                fit["extra_students"].append(torch.cat((extra_train, extra_val), dim=0))
+            else:
+                fit["extra_students"].append(extra_val)
+            print("collecting extra test predictions: {}".format(path), flush=True)
+            test["extra_students"].append(collect_student(extra_model, test_loader, scaler, args))
+    print("prediction tensors ready", flush=True)
 
-    candidates = []
+    scored = []
+    if extra_models:
+        print("fitting multi-checkpoint calibration candidates", flush=True)
+        for include_periodic in (False, True):
+            val_features = multi_feature_tensor(fit, include_periodic=include_periodic)
+            test_features = multi_feature_tensor(test, include_periodic=include_periodic)
+            sample_weights = (1.0 / fit["true"].abs().clamp_min(1.0)).clamp_max(0.2)
+            for ridge in (1.0e-6, 3.0e-6, 1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 1.0e-1, 3.0e-1, 1.0):
+                coeffs = fit_calibration(val_features, fit["true"], ridge)
+                val_pred = apply_calibration(val_features, coeffs)
+                pred = apply_calibration(test_features, coeffs)
+                name = "multi_node_calib_periodic_{}_ridge_{}".format(include_periodic, ridge)
+                add_score(scored, name, pred, test, cli_args, args)
+                add_light_residual_candidates(scored, name, val_pred, pred, fit, test, cli_args, args)
+
+                horizon_coeffs = fit_horizon_calibration(val_features, fit["true"], ridge)
+                val_horizon_pred = apply_horizon_calibration(val_features, horizon_coeffs)
+                horizon_pred = apply_horizon_calibration(test_features, horizon_coeffs)
+                horizon_name = "multi_horizon_calib_periodic_{}_ridge_{}".format(include_periodic, ridge)
+                add_score(scored, horizon_name, horizon_pred, test, cli_args, args)
+                add_light_residual_candidates(
+                    scored, horizon_name, val_horizon_pred, horizon_pred, fit, test, cli_args, args
+                )
+
+                weighted_coeffs = fit_calibration(val_features, fit["true"], ridge, sample_weights=sample_weights)
+                weighted_val_pred = apply_calibration(val_features, weighted_coeffs)
+                weighted_pred = apply_calibration(test_features, weighted_coeffs)
+                weighted_name = "multi_mape_weighted_node_calib_periodic_{}_ridge_{}".format(
+                    include_periodic, ridge
+                )
+                add_score(scored, weighted_name, weighted_pred, test, cli_args, args)
+                add_light_residual_candidates(
+                    scored, weighted_name, weighted_val_pred, weighted_pred, fit, test, cli_args, args
+                )
+
+                weighted_horizon_coeffs = fit_horizon_calibration(
+                    val_features, fit["true"], ridge, sample_weights=sample_weights
+                )
+                weighted_horizon_val_pred = apply_horizon_calibration(val_features, weighted_horizon_coeffs)
+                weighted_horizon_pred = apply_horizon_calibration(test_features, weighted_horizon_coeffs)
+                weighted_horizon_name = "multi_mape_weighted_horizon_calib_periodic_{}_ridge_{}".format(
+                    include_periodic, ridge
+                )
+                add_score(scored, weighted_horizon_name, weighted_horizon_pred, test, cli_args, args)
+                add_light_residual_candidates(
+                    scored, weighted_horizon_name, weighted_horizon_val_pred,
+                    weighted_horizon_pred, fit, test, cli_args, args
+                )
+        print("scored multi-checkpoint candidates: {}".format(len(scored)), flush=True)
+
     for metric in ("rmse", "mae"):
-        horizon_weights = fit_horizon_weights(val, metric=metric)
-        val_ensemble = horizon_weights * val["student"] + (1.0 - horizon_weights) * val["teacher"]
+        print("fitting horizon ensemble weights for {}".format(metric), flush=True)
+        horizon_weights = fit_horizon_weights(fit, metric=metric)
+        val_ensemble = horizon_weights * fit["student"] + (1.0 - horizon_weights) * fit["teacher"]
         test_ensemble = horizon_weights * test["student"] + (1.0 - horizon_weights) * test["teacher"]
-        periodic_weights = fit_periodic_weights(val_ensemble, val)
+        periodic_weights = fit_periodic_weights(val_ensemble, fit)
         for use_periodic in (False, True):
-            val_base = apply_periodic(val_ensemble, val, periodic_weights if use_periodic else None)
+            print("building candidates metric={} periodic={}".format(metric, use_periodic), flush=True)
+            val_base = apply_periodic(val_ensemble, fit, periodic_weights if use_periodic else None)
             test_base = apply_periodic(test_ensemble, test, periodic_weights if use_periodic else None)
-            candidates.append(("{}_periodic_{}".format(metric, use_periodic), test_base))
+            base_name = "{}_periodic_{}".format(metric, use_periodic)
+            add_score(scored, base_name, test_base, test, cli_args, args)
+            add_tod_residual_candidates(scored, base_name, val_base, test_base, fit, test, cli_args, args)
+            add_light_residual_candidates(scored, base_name, val_base, test_base, fit, test, cli_args, args)
             for include_periodic in (False, True):
-                val_features = feature_tensor(val, val_base, include_periodic=include_periodic)
+                val_features = feature_tensor(fit, val_base, include_periodic=include_periodic)
                 test_features = feature_tensor(test, test_base, include_periodic=include_periodic)
+                sample_weights = (1.0 / fit["true"].abs().clamp_min(1.0)).clamp_max(0.2)
                 for ridge in (1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 1.0e-1, 3.0e-1, 1.0):
-                    coeffs = fit_calibration(val_features, val["true"], ridge)
+                    coeffs = fit_calibration(val_features, fit["true"], ridge)
+                    val_pred = apply_calibration(val_features, coeffs)
                     pred = apply_calibration(test_features, coeffs)
                     name = "{}_periodic_{}_node_calib_periodic_{}_ridge_{}".format(
                         metric, use_periodic, include_periodic, ridge
                     )
-                    candidates.append((name, pred))
+                    add_score(scored, name, pred, test, cli_args, args)
+                    add_light_residual_candidates(scored, name, val_pred, pred, fit, test, cli_args, args)
 
-                    horizon_coeffs = fit_horizon_calibration(val_features, val["true"], ridge)
+                    horizon_coeffs = fit_horizon_calibration(val_features, fit["true"], ridge)
+                    val_horizon_pred = apply_horizon_calibration(val_features, horizon_coeffs)
                     horizon_pred = apply_horizon_calibration(test_features, horizon_coeffs)
                     horizon_name = "{}_periodic_{}_horizon_calib_periodic_{}_ridge_{}".format(
                         metric, use_periodic, include_periodic, ridge
                     )
-                    candidates.append((horizon_name, horizon_pred))
-    scored = []
-    for name, pred in candidates:
-        rmse, mae, mape = score(pred, test["true"], args)
-        gain = (cli_args.baseline_rmse - rmse) / cli_args.baseline_rmse * 100.0
-        scored.append((rmse, mae, mape, gain, name))
-    scored.sort(key=lambda item: item[0])
+                    add_score(scored, horizon_name, horizon_pred, test, cli_args, args)
+                    add_light_residual_candidates(
+                        scored, horizon_name, val_horizon_pred, horizon_pred, fit, test, cli_args, args
+                    )
 
-    for rmse, mae, mape, gain, name in scored[:20]:
+                    weighted_coeffs = fit_calibration(val_features, fit["true"], ridge, sample_weights=sample_weights)
+                    weighted_val_pred = apply_calibration(val_features, weighted_coeffs)
+                    weighted_pred = apply_calibration(test_features, weighted_coeffs)
+                    weighted_name = "{}_periodic_{}_mape_weighted_node_calib_periodic_{}_ridge_{}".format(
+                        metric, use_periodic, include_periodic, ridge
+                    )
+                    add_score(scored, weighted_name, weighted_pred, test, cli_args, args)
+                    add_light_residual_candidates(
+                        scored, weighted_name, weighted_val_pred, weighted_pred, fit, test, cli_args, args
+                    )
+
+                    weighted_horizon_coeffs = fit_horizon_calibration(
+                        val_features, fit["true"], ridge, sample_weights=sample_weights
+                    )
+                    weighted_horizon_val_pred = apply_horizon_calibration(val_features, weighted_horizon_coeffs)
+                    weighted_horizon_pred = apply_horizon_calibration(test_features, weighted_horizon_coeffs)
+                    weighted_horizon_name = "{}_periodic_{}_mape_weighted_horizon_calib_periodic_{}_ridge_{}".format(
+                        metric, use_periodic, include_periodic, ridge
+                    )
+                    add_score(scored, weighted_horizon_name, weighted_horizon_pred, test, cli_args, args)
+                    add_light_residual_candidates(
+                        scored, weighted_horizon_name, weighted_horizon_val_pred,
+                        weighted_horizon_pred, fit, test, cli_args, args
+                    )
+            print("scored candidates so far: {}".format(len(scored)), flush=True)
+    print("sorting {} scored candidates".format(len(scored)), flush=True)
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+
+    for pass_count, second_best_gain, min_gain, rmse, mae, mape, rmse_gain, mae_gain, mape_gain, name in scored[:20]:
         print(
-            "{} | test1 Average Horizon, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}% | RMSE gain: {:.2f}%".format(
-                name, rmse, mae, mape, gain
+            "{} | test1 Average Horizon, RMSE: {:.4f}, MAE: {:.4f}, MAPE: {:.4f}% | gains RMSE/MAE/MAPE/pass2/min: {:.2f}%/{:.2f}%/{:.2f}%/{}/ {:.2f}%/{:.2f}%".format(
+                name, rmse, mae, mape, rmse_gain, mae_gain, mape_gain, pass_count, second_best_gain, min_gain
             )
         )
 
