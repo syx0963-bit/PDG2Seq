@@ -407,6 +407,85 @@ def fit_horizon_node_residual(pred, data, ridge_count, reducer="mean"):
     return (center + ridge_count * global_mean) / (1.0 + ridge_count)
 
 
+def fit_horizon_scale(pred, true, metric="mape"):
+    grid = torch.linspace(0.94, 1.06, 121, device=pred.device)
+    scales = []
+    for horizon_idx in range(pred.shape[1]):
+        best_scale = 1.0
+        best_score = float("inf")
+        pred_h = pred[:, horizon_idx]
+        true_h = true[:, horizon_idx]
+        for scale in grid:
+            err = scale * pred_h - true_h
+            if metric == "mae":
+                score = torch.mean(torch.abs(err)).item()
+            elif metric == "rmse":
+                score = torch.sqrt(torch.mean(err * err)).item()
+            else:
+                score = torch.mean(torch.abs(err) / (true_h.abs() + 0.001)).item()
+            if score < best_score:
+                best_score = score
+                best_scale = float(scale.item())
+        scales.append(best_scale)
+    return torch.tensor(scales, device=pred.device).view(1, -1, 1, 1)
+
+
+def fit_value_bin_adjustment(pred, data, bins, ridge_count, mode="residual", weighted=False):
+    true = data["true"]
+    device = pred.device
+    corrections = torch.zeros(pred.shape[1], bins, 1, 1, device=device)
+    edges = torch.zeros(pred.shape[1], bins + 1, device=device)
+    quantiles = torch.linspace(0.0, 1.0, bins + 1, device=device)
+    global_residual = (true - pred).mean()
+    global_ratio = (true / pred.clamp_min(1.0)).clamp(0.7, 1.3).mean()
+
+    for horizon_idx in range(pred.shape[1]):
+        pred_flat = pred[:, horizon_idx].reshape(-1)
+        true_flat = true[:, horizon_idx].reshape(-1)
+        horizon_edges = torch.quantile(pred_flat, quantiles)
+        horizon_edges[0] = -float("inf")
+        horizon_edges[-1] = float("inf")
+        edges[horizon_idx] = horizon_edges
+        bucket_idx = torch.bucketize(pred_flat, horizon_edges[1:-1])
+
+        for bucket in range(bins):
+            mask = bucket_idx == bucket
+            if not mask.any():
+                corrections[horizon_idx, bucket] = (
+                    global_ratio if mode == "ratio" else global_residual
+                )
+                continue
+            pred_bin = pred_flat[mask]
+            true_bin = true_flat[mask]
+            if mode == "ratio":
+                values = (true_bin / pred_bin.clamp_min(1.0)).clamp(0.7, 1.3)
+                prior = global_ratio
+            else:
+                values = true_bin - pred_bin
+                prior = global_residual
+            if weighted:
+                weights = 1.0 / (true_bin.abs() + 0.001)
+                center = torch.sum(values * weights) / torch.sum(weights).clamp_min(1.0e-6)
+            else:
+                center = values.mean()
+            corrections[horizon_idx, bucket] = (center + ridge_count * prior) / (1.0 + ridge_count)
+    return edges, corrections
+
+
+def apply_value_bin_adjustment(pred, adjustment, shrink, mode="residual"):
+    edges, corrections = adjustment
+    out = pred.clone()
+    for horizon_idx in range(pred.shape[1]):
+        pred_flat = pred[:, horizon_idx].reshape(-1)
+        bucket_idx = torch.bucketize(pred_flat, edges[horizon_idx, 1:-1])
+        values = corrections[horizon_idx, bucket_idx].reshape_as(out[:, horizon_idx])
+        if mode == "ratio":
+            out[:, horizon_idx] = out[:, horizon_idx] * (1.0 + shrink * (values - 1.0))
+        else:
+            out[:, horizon_idx] = out[:, horizon_idx] + shrink * values
+    return out
+
+
 def fit_horizon_affine(pred, true, ridge):
     x = pred.reshape(pred.shape[0], pred.shape[1], -1, pred.shape[3])
     y = true.reshape(true.shape[0], true.shape[1], -1, true.shape[3])
@@ -430,7 +509,14 @@ def apply_horizon_affine(pred, coeffs):
     return scale * pred + bias
 
 
-def add_light_residual_candidates(scored, name, val_pred, test_pred, val, test, cli_args, args):
+def add_light_residual_candidates(
+    scored, name, val_pred, test_pred, val, test, cli_args, args, include_value_bins=False
+):
+    for metric in ("mape", "mae", "rmse"):
+        scales = fit_horizon_scale(val_pred, val["true"], metric=metric)
+        pred = scales * test_pred
+        add_score(scored, "{}_horizon_scale_{}".format(name, metric), pred, test, cli_args, args)
+
     for reducer in ("mean", "median"):
         for ridge_count in (0.0, 0.5, 1.0, 2.0, 4.0):
             residual = fit_horizon_node_residual(val_pred, val, ridge_count, reducer=reducer)
@@ -444,6 +530,30 @@ def add_light_residual_candidates(scored, name, val_pred, test_pred, val, test, 
                     cli_args,
                     args,
                 )
+    if include_value_bins:
+        for mode in ("residual", "ratio"):
+            for weighted in (False, True):
+                for bins in (6, 10):
+                    for ridge_count in (8.0, 32.0):
+                        adjustment = fit_value_bin_adjustment(
+                            val_pred, val, bins=bins, ridge_count=ridge_count,
+                            mode=mode, weighted=weighted
+                        )
+                        for shrink in (0.25, 0.5, 0.75, 1.0):
+                            pred = apply_value_bin_adjustment(
+                                test_pred, adjustment, shrink=shrink, mode=mode
+                            )
+                            add_score(
+                                scored,
+                                "{}_valuebin_{}_weighted_{}_bins_{}_ridge_{}_shrink_{}".format(
+                                    name, mode, weighted, bins, ridge_count, shrink
+                                ),
+                                pred,
+                                test,
+                                cli_args,
+                                args,
+                            )
+
     for ridge in (1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0):
         coeffs = fit_horizon_affine(val_pred, val["true"], ridge)
         pred = apply_horizon_affine(test_pred, coeffs)
@@ -506,7 +616,8 @@ def main():
     test = collect(student, teacher, test_loader, scaler, args)
     if extra_models:
         val["extra_students"] = []
-        fit["extra_students"] = []
+        if fit is not val:
+            fit["extra_students"] = []
         test["extra_students"] = []
         for path, extra_model in extra_models:
             print("collecting extra validation predictions: {}".format(path), flush=True)
@@ -516,8 +627,6 @@ def main():
                 print("collecting extra train predictions for fit set: {}".format(path), flush=True)
                 extra_train = collect_student(extra_model, train_loader, scaler, args)
                 fit["extra_students"].append(torch.cat((extra_train, extra_val), dim=0))
-            else:
-                fit["extra_students"].append(extra_val)
             print("collecting extra test predictions: {}".format(path), flush=True)
             test["extra_students"].append(collect_student(extra_model, test_loader, scaler, args))
     print("prediction tensors ready", flush=True)
@@ -585,7 +694,10 @@ def main():
             base_name = "{}_periodic_{}".format(metric, use_periodic)
             add_score(scored, base_name, test_base, test, cli_args, args)
             add_tod_residual_candidates(scored, base_name, val_base, test_base, fit, test, cli_args, args)
-            add_light_residual_candidates(scored, base_name, val_base, test_base, fit, test, cli_args, args)
+            add_light_residual_candidates(
+                scored, base_name, val_base, test_base, fit, test, cli_args, args,
+                include_value_bins=True
+            )
             for include_periodic in (False, True):
                 val_features = feature_tensor(fit, val_base, include_periodic=include_periodic)
                 test_features = feature_tensor(test, test_base, include_periodic=include_periodic)
