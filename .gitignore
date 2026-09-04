@@ -23,6 +23,7 @@ logs/
 experiments/
 
 # Training/runtime artifacts
+nohup.out
 *.log
 *.tmp
 *.csv

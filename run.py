@@ -152,6 +152,19 @@ args.add_argument('--periodic_consistency_eval', default=True, type=str_to_bool)
 args.add_argument('--use_decoder_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_eval_calibration', default=True, type=str_to_bool)
 args.add_argument('--eval_calibration_ridge', default=1.0e-3, type=float)
+args.add_argument('--use_online_adaptation', default=False, type=str_to_bool)
+args.add_argument('--online_adapt_lr', default=0.08, type=float)
+args.add_argument('--online_scale_lr', default=0.02, type=float)
+args.add_argument('--online_adapt_decay', default=0.95, type=float)
+args.add_argument('--online_error_decay', default=0.90, type=float)
+args.add_argument('--online_drift_sensitivity', default=1.0, type=float)
+args.add_argument('--online_graph_topk', default=8, type=int)
+args.add_argument('--online_neighbor_expand', default=0.35, type=float)
+args.add_argument('--online_bias_clip', default=8.0, type=float)
+args.add_argument('--online_scale_clip', default=0.08, type=float)
+args.add_argument('--online_warmup_val', default=True, type=str_to_bool)
+args.add_argument('--online_overlap_memory', default=False, type=str_to_bool)
+args.add_argument('--online_overlap_blend', default=0.85, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--mape_loss_weight', default=0.05, type=float)
@@ -286,6 +299,8 @@ def build_innovation_name(args):
         names.append('MetaReliableGraph')
     if args.use_periodic_consistency:
         names.append('PeriodicConsistency')
+    if args.use_online_adaptation:
+        names.append('OnlineGraphAdapt')
     if not names:
         names.append('Baseline')
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(names))
