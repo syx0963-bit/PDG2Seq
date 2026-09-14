@@ -19,10 +19,10 @@ def load_st_dataset(dataset):
         data_path = _resolve_data_path('./data/PeMS04/PEMS04.npz', './data/data/PeMS04/PEMS04.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD7':
-        data_path = _resolve_data_path('./data/PeMS07/PEMS07.npz', './data/data/PEMS07/PEMS07.npz')
+        data_path = _resolve_data_path('./data/PeMS07/PEMS07.npz', './data/PEMS07/PEMS07.npz', './data/data/PEMS07/PEMS07.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD8':
-        data_path = _resolve_data_path('./data/PeMS08/PEMS08.npz', './data/data/PEMS08/PEMS08.npz')
+        data_path = _resolve_data_path('./data/PeMS08/PEMS08.npz', './data/PEMS08/PEMS08.npz', './data/data/PEMS08/PEMS08.npz')
         data = np.load(data_path)['data'][:, :, 0]  #onley the first dimension, traffic flow data
     elif dataset == 'PEMSD7(L)':
         data_path = _resolve_data_path('./data/PEMS07(L)/PEMS07L.npz')
