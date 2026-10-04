@@ -763,6 +763,7 @@ class Trainer(object):
             'use_periodic_consistency',
             'use_decoder_periodic_context',
             'use_reliable_invariant_learning',
+            'use_long_short_multiscale',
         ):
             setattr(teacher_args, flag, False)
         teacher = PDG2Seq(teacher_args).to(self.args.device)

@@ -199,6 +199,8 @@ args.add_argument('--env_perturb_bias', default=0.15, type=float)
 args.add_argument('--env_perturb_noise', default=0.03, type=float)
 args.add_argument('--env_perturb_mask_prob', default=0.05, type=float)
 args.add_argument('--env_perturb_periodic_shift_prob', default=0.20, type=float)
+args.add_argument('--use_long_short_multiscale', default=False, type=str_to_bool)
+args.add_argument('--long_short_residual_scale', default=0.10, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--mape_loss_weight', default=0.05, type=float)
@@ -262,10 +264,10 @@ if args.mode == 'train' and args.train_init_path:
     state = torch.load(args.train_init_path, map_location=args.device)
     if isinstance(state, dict) and 'state_dict' in state:
         state = state['state_dict']
-    if args.use_reliable_invariant_learning:
+    if args.use_reliable_invariant_learning or args.use_long_short_multiscale:
         incompatible = model.load_state_dict(state, strict=False)
         print(
-            "Initialize training model from {} with new invariant modules randomly initialized; "
+            "Initialize training model from {} with newly added modules randomly initialized; "
             "missing keys: {}, unexpected keys: {}".format(
                 args.train_init_path, len(incompatible.missing_keys), len(incompatible.unexpected_keys)
             )
@@ -346,6 +348,8 @@ def build_innovation_name(args):
         names.append('OnlineGraphAdapt')
     if args.use_reliable_invariant_learning:
         names.append('ReliableInvariant')
+    if args.use_long_short_multiscale:
+        names.append('LongShortMultiScale')
     if not names:
         names.append('Baseline')
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(names))
@@ -369,8 +373,17 @@ elif args.mode == 'test':
     state = torch.load(test_model_path, map_location=args.device)
     if isinstance(state, dict) and 'state_dict' in state:
         state = state['state_dict']
-    model.load_state_dict(state)
-    print("Load saved model from {}".format(test_model_path))
+    if args.use_reliable_invariant_learning or args.use_long_short_multiscale:
+        incompatible = model.load_state_dict(state, strict=False)
+        print(
+            "Load saved model from {} with newly added modules randomly initialized; "
+            "missing keys: {}, unexpected keys: {}".format(
+                test_model_path, len(incompatible.missing_keys), len(incompatible.unexpected_keys)
+            )
+        )
+    else:
+        model.load_state_dict(state)
+        print("Load saved model from {}".format(test_model_path))
     trainer._test_or_dgq_ensemble("This is test_model")
 else:
     raise ValueError

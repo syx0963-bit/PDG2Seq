@@ -37,6 +37,8 @@ PYTHON_BIN="/root/miniconda3/envs/PDG2SEQ_CU128/bin/python"
   --env_perturb_noise 0.03 \
   --env_perturb_mask_prob 0.05 \
   --env_perturb_periodic_shift_prob 0.20 \
+  --use_long_short_multiscale true \
+  --long_short_residual_scale 0.10 \
   --use_online_adaptation true \
   --online_adapt_lr 0.04 \
   --online_scale_lr 0.08 \

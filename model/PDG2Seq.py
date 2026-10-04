@@ -4,6 +4,62 @@ from model.PDG2SeqCell import PDG2SeqCell
 import numpy as np
 
 
+class LongShortMultiScaleFusion(nn.Module):
+    def __init__(self, hidden_dim, horizon, output_dim, residual_scale=0.1):
+        super(LongShortMultiScaleFusion, self).__init__()
+        self.horizon = horizon
+        self.residual_scale = residual_scale
+        self.short_encoder = nn.Linear(1, hidden_dim)
+        self.trend_encoder = nn.Linear(1, hidden_dim)
+        self.periodic_encoder = nn.Linear(1, hidden_dim)
+        self.long_encoder = nn.Linear(1, hidden_dim)
+        self.horizon_embedding = nn.Parameter(torch.empty(horizon, hidden_dim))
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4)
+        )
+        self.state_fusion = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, source_traffic, base_state, periodic_context=None, context_valid=None):
+        short_signal = source_traffic[:, -1, :, :]
+        history_mean = source_traffic.mean(dim=1)
+        early_mean = source_traffic[:, :max(source_traffic.shape[1] // 2, 1), :, :].mean(dim=1)
+        trend_signal = source_traffic[:, -1, :, :] - early_mean
+
+        if periodic_context is not None:
+            if context_valid is None:
+                context_weight = torch.ones_like(periodic_context)
+            else:
+                context_weight = context_valid.expand_as(periodic_context)
+            valid_count = context_weight.sum(dim=1).clamp_min(1.0)
+            long_signal = (periodic_context * context_weight).sum(dim=1) / valid_count
+            periodic_signal = periodic_context[:, -1, :, :]
+            if context_valid is not None:
+                last_valid = context_valid[:, -1, :, :]
+                periodic_signal = last_valid * periodic_signal + (1.0 - last_valid) * history_mean
+        else:
+            long_signal = history_mean
+            periodic_signal = history_mean
+
+        scale_repr = torch.stack((
+            self.short_encoder(short_signal),
+            self.trend_encoder(trend_signal),
+            self.periodic_encoder(periodic_signal),
+            self.long_encoder(long_signal)
+        ), dim=1)
+
+        horizon_state = base_state.unsqueeze(1).expand(-1, self.horizon, -1, -1)
+        horizon_emb = self.horizon_embedding.view(1, self.horizon, 1, -1).expand_as(horizon_state)
+        gate_logits = self.gate(torch.cat((horizon_state, horizon_emb), dim=-1))
+        gate = torch.softmax(gate_logits, dim=-1)
+        fused = torch.sum(gate.permute(0, 1, 3, 2).unsqueeze(-1) * scale_repr.unsqueeze(1), dim=2)
+        state_delta = self.state_fusion(fused[:, 0])
+        residual = self.residual_scale * self.out_proj(fused)
+        return state_delta, residual, gate
+
+
 class PDG2Seq_Encoder(nn.Module):
     def __init__(self, node_num, dim_in, dim_out, cheb_k, embed_dim, time_dim, num_layers=1, args=None):
         super(PDG2Seq_Encoder, self).__init__()
@@ -89,8 +145,9 @@ class PDG2Seq(nn.Module):
         self.use_context_graph_refine = args.use_context_graph_refine
         self.use_meta_reliable_graph = getattr(args, 'use_meta_reliable_graph', False)
         self.use_reliable_invariant_learning = getattr(args, 'use_reliable_invariant_learning', False)
+        self.use_long_short_multiscale = getattr(args, 'use_long_short_multiscale', False)
         self.use_periodic_graph_context = args.use_periodic_context and (
-            args.use_context_graph_refine or self.use_meta_reliable_graph
+            args.use_context_graph_refine or self.use_meta_reliable_graph or self.use_long_short_multiscale
         )
         self.use_periodic_consistency = getattr(args, 'use_periodic_consistency', False)
         self.use_decoder_periodic_context = getattr(args, 'use_decoder_periodic_context', False)
@@ -131,6 +188,15 @@ class PDG2Seq(nn.Module):
             self.invariant_encoder = None
             self.env_encoder = None
             self.repr_fusion = None
+        if self.use_long_short_multiscale:
+            self.long_short_fusion = LongShortMultiScaleFusion(
+                self.hidden_dim,
+                self.horizon,
+                self.output_dim,
+                residual_scale=float(getattr(args, 'long_short_residual_scale', 0.1))
+            )
+        else:
+            self.long_short_fusion = None
 
     def forward(self, source, traget=None, batches_seen=None, return_representation=False):
         t_i_d_data1 = source[..., 0, -2]
@@ -192,6 +258,16 @@ class PDG2Seq(nn.Module):
             invariant_state = self.invariant_encoder(raw_state)
             env_state = self.env_encoder(raw_state)
             state = self.repr_fusion(torch.cat((invariant_state, env_state), dim=-1))
+        multiscale_residual = None
+        multiscale_gate = None
+        if self.use_long_short_multiscale:
+            state_delta, multiscale_residual, multiscale_gate = self.long_short_fusion(
+                source_traffic,
+                state,
+                periodic_context=periodic_context,
+                context_valid=context_valid
+            )
+            state = state + state_delta
 
         ht_list = [state] * self.num_layers
 
@@ -217,6 +293,8 @@ class PDG2Seq(nn.Module):
                 if c < self._compute_sampling_threshold(batches_seen):
                     go = traget[:, t, :, 0].unsqueeze(-1)
         output = torch.stack(out, dim=1)
+        if multiscale_residual is not None:
+            output = output + multiscale_residual
 
         if return_representation:
             if invariant_state is None:
@@ -225,7 +303,8 @@ class PDG2Seq(nn.Module):
             return output, {
                 'raw': raw_state,
                 'invariant': invariant_state,
-                'environment': env_state
+                'environment': env_state,
+                'long_short_gate': multiscale_gate
             }
         return output
 
