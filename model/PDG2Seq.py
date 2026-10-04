@@ -88,6 +88,7 @@ class PDG2Seq(nn.Module):
         self.use_W = args.use_week
         self.use_context_graph_refine = args.use_context_graph_refine
         self.use_meta_reliable_graph = getattr(args, 'use_meta_reliable_graph', False)
+        self.use_reliable_invariant_learning = getattr(args, 'use_reliable_invariant_learning', False)
         self.use_periodic_graph_context = args.use_periodic_context and (
             args.use_context_graph_refine or self.use_meta_reliable_graph
         )
@@ -112,8 +113,26 @@ class PDG2Seq(nn.Module):
         )
         self.proj = nn.Sequential(nn.Linear(self.hidden_dim, self.output_dim, bias=True))
         self.end_conv = nn.Conv2d(1, args.horizon * self.output_dim, kernel_size=(1, self.hidden_dim), bias=True)
+        if self.use_reliable_invariant_learning:
+            invariant_dim = getattr(args, 'invariant_repr_dim', args.rnn_units)
+            env_dim = getattr(args, 'env_repr_dim', args.rnn_units)
+            self.invariant_encoder = nn.Sequential(
+                nn.Linear(self.hidden_dim, invariant_dim),
+                nn.ReLU(),
+                nn.Linear(invariant_dim, self.hidden_dim)
+            )
+            self.env_encoder = nn.Sequential(
+                nn.Linear(self.hidden_dim, env_dim),
+                nn.ReLU(),
+                nn.Linear(env_dim, self.hidden_dim)
+            )
+            self.repr_fusion = nn.Linear(2 * self.hidden_dim, self.hidden_dim)
+        else:
+            self.invariant_encoder = None
+            self.env_encoder = None
+            self.repr_fusion = None
 
-    def forward(self, source, traget=None, batches_seen=None):
+    def forward(self, source, traget=None, batches_seen=None, return_representation=False):
         t_i_d_data1 = source[..., 0, -2]
         t_i_d_data2 = traget[..., 0, -2]
         t_i_d_idx1 = torch.clamp((t_i_d_data1 * self.steps_per_day).long(), 0, self.steps_per_day - 1).to(source.device)
@@ -166,6 +185,13 @@ class PDG2Seq(nn.Module):
             context_valid=context_valid
         )
         state = state[:, -1:, :, :].squeeze(1)
+        raw_state = state
+        invariant_state = None
+        env_state = None
+        if self.use_reliable_invariant_learning:
+            invariant_state = self.invariant_encoder(raw_state)
+            env_state = self.env_encoder(raw_state)
+            state = self.repr_fusion(torch.cat((invariant_state, env_state), dim=-1))
 
         ht_list = [state] * self.num_layers
 
@@ -192,9 +218,31 @@ class PDG2Seq(nn.Module):
                     go = traget[:, t, :, 0].unsqueeze(-1)
         output = torch.stack(out, dim=1)
 
+        if return_representation:
+            if invariant_state is None:
+                invariant_state = raw_state
+                env_state = torch.zeros_like(raw_state)
+            return output, {
+                'raw': raw_state,
+                'invariant': invariant_state,
+                'environment': env_state
+            }
         return output
 
     def _compute_sampling_threshold(self, batches_seen):
         x = self.cl_decay_steps / (
             self.cl_decay_steps + np.exp(batches_seen / self.cl_decay_steps))
         return x
+
+    def get_latest_reliable_graph(self):
+        graphs = []
+        for module in list(self.encoder.PDG2Seq_cells) + list(self.decoder.PDG2Seq_cells):
+            graph = getattr(module, 'latest_reliable_graph', None)
+            if graph is not None:
+                graphs.append(graph)
+        if not graphs:
+            return None
+        graph = torch.stack(graphs, dim=0).mean(dim=0)
+        graph = torch.relu(0.5 * (graph + graph.transpose(0, 1)))
+        graph = graph + torch.eye(self.num_node, device=graph.device)
+        return graph / graph.sum(-1, keepdim=True).clamp_min(1.0e-8)

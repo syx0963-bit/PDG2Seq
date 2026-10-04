@@ -25,6 +25,8 @@ class GraphAwareOnlineAdapter(object):
         self.num_nodes = int(args.num_nodes)
         self.lr = float(getattr(args, 'online_adapt_lr', 0.08))
         self.scale_lr = float(getattr(args, 'online_scale_lr', 0.02))
+        self.global_lr = float(getattr(args, 'online_global_adapt_lr', 0.0))
+        self.global_scale_lr = float(getattr(args, 'online_global_scale_lr', 0.0))
         self.bias_decay = float(getattr(args, 'online_adapt_decay', 0.95))
         self.error_decay = float(getattr(args, 'online_error_decay', 0.90))
         self.sensitivity = float(getattr(args, 'online_drift_sensitivity', 1.0))
@@ -33,8 +35,14 @@ class GraphAwareOnlineAdapter(object):
         self.scale_clip = float(getattr(args, 'online_scale_clip', 0.08))
         self.use_overlap_memory = bool(getattr(args, 'online_overlap_memory', False))
         self.overlap_blend = float(getattr(args, 'online_overlap_blend', 0.85))
+        lr_start = float(getattr(args, 'online_horizon_lr_start', 1.0))
+        lr_end = float(getattr(args, 'online_horizon_lr_end', 1.0))
+        self.horizon_lr_gain = torch.linspace(
+            lr_start, lr_end, self.horizon, device=self.device
+        ).view(self.horizon, 1, 1)
         self.bias = torch.zeros(1, self.horizon, self.num_nodes, 1, device=self.device)
         self.scale = torch.ones(1, self.horizon, self.num_nodes, 1, device=self.device)
+        self.post_bias = torch.zeros(1, self.horizon, self.num_nodes, 1, device=self.device)
         self.error_ema = torch.zeros(self.horizon, self.num_nodes, 1, device=self.device)
         self.prev_true = None
         self.update_count = 0
@@ -58,7 +66,7 @@ class GraphAwareOnlineAdapter(object):
             return graph / graph.sum(-1, keepdim=True).clamp_min(1.0e-8)
 
     def apply(self, pred):
-        pred = torch.clamp(self.scale * pred + self.bias, min=0.0)
+        pred = torch.clamp(self.scale * pred + self.bias + self.post_bias, min=0.0)
         if self.use_overlap_memory and self.prev_true is not None and pred.shape[1] > 1:
             known = self.prev_true[:, 1:, :, :]
             pred[:, :-1, :, :] = (
@@ -100,10 +108,14 @@ class GraphAwareOnlineAdapter(object):
         mean_residual = residual.mean(dim=0)
         mean_relative_residual = (residual / pred.abs().clamp_min(1.0)).mean(dim=0)
         self.bias = self.bias_decay * self.bias
-        local_update = self.lr * mean_residual * local_mask.float()
+        global_update = self.global_lr * self.horizon_lr_gain * mean_residual
+        local_update = self.lr * self.horizon_lr_gain * mean_residual * local_mask.float()
         self.bias = torch.clamp(self.bias + local_update.unsqueeze(0), -self.bias_clip, self.bias_clip)
-        scale_update = self.scale_lr * mean_relative_residual * local_mask.float()
+        self.bias = torch.clamp(self.bias + global_update.unsqueeze(0), -self.bias_clip, self.bias_clip)
+        global_scale_update = self.global_scale_lr * self.horizon_lr_gain * mean_relative_residual
+        scale_update = self.scale_lr * self.horizon_lr_gain * mean_relative_residual * local_mask.float()
         self.scale = self.scale + scale_update.unsqueeze(0)
+        self.scale = self.scale + global_scale_update.unsqueeze(0)
         self.scale = torch.clamp(self.scale, 1.0 - self.scale_clip, 1.0 + self.scale_clip)
         self.update_count += 1
         self.drift_count += int(drift_mask.sum().item())
@@ -117,6 +129,17 @@ class GraphAwareOnlineAdapter(object):
             'scale_mean': float(torch.abs(self.scale - 1.0).mean().detach().cpu().item()),
             'scale_max': float(torch.abs(self.scale - 1.0).max().detach().cpu().item()),
         }
+
+    def reset_overlap_state(self):
+        self.prev_true = None
+
+    def set_post_bias(self, residual_mean):
+        shrink = float(getattr(self.args, 'online_val_bias_shrink', 0.35))
+        self.post_bias = torch.clamp(
+            shrink * residual_mean.to(self.device).view(1, self.horizon, self.num_nodes, 1),
+            -self.bias_clip,
+            self.bias_clip
+        )
 
 
 class Trainer(object):
@@ -158,6 +181,133 @@ class Trainer(object):
         if handle is None:
             return None
         return pynvml.nvmlDeviceGetMemoryInfo(handle)
+
+    def _use_reliable_invariant_training(self):
+        return getattr(self.args, 'use_reliable_invariant_learning', False) and self.model.training
+
+    def _build_invariant_reliability_graph(self):
+        with torch.no_grad():
+            num_nodes = int(self.args.num_nodes)
+            latest_graph = None
+            if hasattr(self.model, 'get_latest_reliable_graph'):
+                latest_graph = self.model.get_latest_reliable_graph()
+            if latest_graph is not None:
+                latest_graph = latest_graph.detach().to(self.args.device)
+                return latest_graph / latest_graph.sum(-1, keepdim=True).clamp_min(1.0e-8)
+            emb = getattr(self.model, 'node_embeddings1', None)
+            if emb is None:
+                return torch.eye(num_nodes, device=self.args.device)
+            emb = F.normalize(emb.detach().to(self.args.device), dim=-1, eps=1.0e-8)
+            sim = torch.relu(torch.matmul(emb, emb.transpose(0, 1)))
+            sim.fill_diagonal_(0.0)
+            topk = min(
+                max(int(getattr(self.args, 'invariant_reliable_topk', getattr(self.args, 'online_graph_topk', 8))), 1),
+                num_nodes - 1
+            )
+            values, indices = torch.topk(sim, k=topk, dim=-1)
+            graph = torch.zeros_like(sim)
+            graph.scatter_(1, indices, values)
+            graph = 0.5 * (graph + graph.transpose(0, 1))
+            graph = graph + torch.eye(num_nodes, device=graph.device)
+            return graph / graph.sum(-1, keepdim=True).clamp_min(1.0e-8)
+
+    def _augment_traffic_environment(self, data, target):
+        aug_data = data.clone()
+        aug_target = target.clone()
+        batch_size, _, num_nodes, _ = aug_data.shape
+        device = aug_data.device
+        node_prob = float(getattr(self.args, 'env_perturb_node_prob', 0.35))
+        scale_range = float(getattr(self.args, 'env_perturb_scale', 0.20))
+        bias_range = float(getattr(self.args, 'env_perturb_bias', 0.15))
+        noise_std = float(getattr(self.args, 'env_perturb_noise', 0.03))
+        mask_prob = float(getattr(self.args, 'env_perturb_mask_prob', 0.05))
+        periodic_shift_prob = float(getattr(self.args, 'env_perturb_periodic_shift_prob', 0.20))
+
+        node_mask = (torch.rand(batch_size, 1, num_nodes, 1, device=device) < node_prob).float()
+        scale = 1.0 + (torch.rand(batch_size, 1, num_nodes, 1, device=device) * 2.0 - 1.0) * scale_range
+        bias = (torch.rand(batch_size, 1, num_nodes, 1, device=device) * 2.0 - 1.0) * bias_range
+
+        def perturb_traffic(x):
+            y = x * (1.0 + node_mask * (scale - 1.0)) + node_mask * bias
+            if noise_std > 0.0:
+                y = y + node_mask * torch.randn_like(y) * noise_std
+            return y
+
+        aug_data[..., 0:1] = perturb_traffic(aug_data[..., 0:1])
+        if aug_data.shape[-1] >= 3 and getattr(self.args, 'use_periodic_context', False):
+            aug_data[..., 1:2] = perturb_traffic(aug_data[..., 1:2])
+
+        target_mask = node_mask.expand(-1, aug_target.shape[1], -1, -1)
+        target_scale = scale.expand(-1, aug_target.shape[1], -1, -1)
+        target_bias = bias.expand(-1, aug_target.shape[1], -1, -1)
+        aug_target[..., 0:1] = (
+            aug_target[..., 0:1] * (1.0 + target_mask * (target_scale - 1.0))
+            + target_mask * target_bias
+        )
+        if noise_std > 0.0:
+            aug_target[..., 0:1] = aug_target[..., 0:1] + target_mask * torch.randn_like(aug_target[..., 0:1]) * noise_std
+        if aug_target.shape[-1] >= 3 and getattr(self.args, 'use_periodic_consistency', False):
+            aug_target[..., 1:2] = (
+                aug_target[..., 1:2] * (1.0 + target_mask * (target_scale - 1.0))
+                + target_mask * target_bias
+            )
+
+        if mask_prob > 0.0:
+            miss_mask = ((torch.rand_like(aug_data[..., 0:1]) < mask_prob).float() * node_mask)
+            aug_data[..., 0:1] = aug_data[..., 0:1] * (1.0 - miss_mask)
+            if aug_data.shape[-1] >= 3 and getattr(self.args, 'use_periodic_context', False):
+                aug_data[..., 1:2] = aug_data[..., 1:2] * (1.0 - miss_mask)
+
+        if periodic_shift_prob > 0.0 and aug_data.shape[1] > 1:
+            shift_flag = (torch.rand(batch_size, 1, 1, 1, device=device) < periodic_shift_prob).float()
+            shifted = torch.roll(aug_data[..., 0:1], shifts=1, dims=1)
+            aug_data[..., 0:1] = shift_flag * shifted + (1.0 - shift_flag) * aug_data[..., 0:1]
+            if aug_data.shape[-1] >= 3 and getattr(self.args, 'use_periodic_context', False):
+                shifted_context = torch.roll(aug_data[..., 1:2], shifts=1, dims=1)
+                aug_data[..., 1:2] = shift_flag * shifted_context + (1.0 - shift_flag) * aug_data[..., 1:2]
+
+        return aug_data, aug_target
+
+    def _representation_orthogonality_loss(self, invariant_repr, env_repr):
+        invariant_repr = F.normalize(invariant_repr, dim=-1, eps=1.0e-8)
+        env_repr = F.normalize(env_repr, dim=-1, eps=1.0e-8)
+        return torch.mean(torch.abs(torch.sum(invariant_repr * env_repr, dim=-1)))
+
+    def _reliable_graph_consistency_loss(self, inv_ref, inv_aug, graph):
+        inv_ref = F.normalize(inv_ref, dim=-1, eps=1.0e-8)
+        inv_aug = F.normalize(inv_aug, dim=-1, eps=1.0e-8)
+        node_weight = graph.mean(dim=0)
+        node_weight = node_weight / node_weight.mean().clamp_min(1.0e-8)
+        node_loss = torch.mean(((inv_ref - inv_aug) ** 2).mean(dim=-1) * node_weight.unsqueeze(0))
+        ref_rel = torch.matmul(inv_ref, inv_ref.transpose(1, 2))
+        aug_rel = torch.matmul(inv_aug, inv_aug.transpose(1, 2))
+        edge_weight = graph.unsqueeze(0)
+        edge_norm = edge_weight.sum().clamp_min(1.0e-8) * float(inv_ref.shape[0])
+        edge_loss = torch.sum(edge_weight * (ref_rel - aug_rel) ** 2) / edge_norm
+        return node_loss + edge_loss
+
+    def _reliable_invariant_training_loss(self, data, target, base_repr):
+        graph = self._build_invariant_reliability_graph()
+        aug_data, aug_target = self._augment_traffic_environment(data, target)
+        aug_label = aug_target[..., :self.args.output_dim].clone()
+        aug_output, aug_repr = self.model(
+            aug_data, aug_target, self.batches_seen, return_representation=True
+        )
+        pred_weight = float(getattr(self.args, 'env_pred_loss_weight', 0.5))
+        inv_weight = float(getattr(self.args, 'invariant_loss_weight', 0.1))
+        env_weight = float(getattr(self.args, 'env_orth_loss_weight', 0.01))
+        pred_loss = self.loss(aug_output, aug_label)
+        inv_loss = self._reliable_graph_consistency_loss(
+            base_repr['invariant'], aug_repr['invariant'], graph
+        )
+        orth_loss = self._representation_orthogonality_loss(
+            aug_repr['invariant'], aug_repr['environment']
+        )
+        return pred_weight * pred_loss + inv_weight * inv_loss + env_weight * orth_loss, {
+            'env_pred': pred_loss.detach(),
+            'invariant': inv_loss.detach(),
+            'orth': orth_loss.detach()
+        }
 
     def val_epoch(self, epoch, val_dataloader):
         self.model.eval()
@@ -235,8 +385,18 @@ class Trainer(object):
             label = target[..., :self.args.output_dim].clone()
             self.optimizer.zero_grad()
 
-            output = self.model(data, target, self.batches_seen)
-            loss = self.loss(output, label)
+            if self._use_reliable_invariant_training():
+                output, base_repr = self.model(
+                    data, target, self.batches_seen, return_representation=True
+                )
+                loss = self.loss(output, label)
+                invariant_loss, invariant_stats = self._reliable_invariant_training_loss(
+                    data, target, base_repr
+                )
+                loss = loss + invariant_loss
+            else:
+                output = self.model(data, target, self.batches_seen)
+                loss = self.loss(output, label)
             loss.backward()
 
             if self.args.grad_norm:
@@ -245,8 +405,18 @@ class Trainer(object):
             total_loss += loss.item()
 
             if (batch_idx + 1) % self.args.log_step == 0:
-                self.logger.info('Train Epoch {}: {}/{} Loss: {:.6f}'.format(
-                    epoch, batch_idx + 1, self.train_per_epoch, loss.item()))
+                if self._use_reliable_invariant_training():
+                    self.logger.info(
+                        'Train Epoch {}: {}/{} Loss: {:.6f}, EnvPred: {:.6f}, Invariant: {:.6f}, Orth: {:.6f}'.format(
+                            epoch, batch_idx + 1, self.train_per_epoch, loss.item(),
+                            self._to_float(invariant_stats['env_pred']),
+                            self._to_float(invariant_stats['invariant']),
+                            self._to_float(invariant_stats['orth'])
+                        )
+                    )
+                else:
+                    self.logger.info('Train Epoch {}: {}/{} Loss: {:.6f}'.format(
+                        epoch, batch_idx + 1, self.train_per_epoch, loss.item()))
         train_epoch_loss = total_loss / self.train_per_epoch
         meminfo = self._get_memory_info()
         gpu_cost = 0.0 if meminfo is None or self.meminfo is None else (meminfo.used - self.meminfo.used) / 1024 ** 3
@@ -454,9 +624,11 @@ class Trainer(object):
             return None
         adapter = GraphAwareOnlineAdapter(self.args, self.model)
         self.logger.info(
-            "Online graph adaptation enabled: lr={}, scale_lr={}, decay={}, error_decay={}, topk={}, sensitivity={}, neighbor_expand={}, bias_clip={}, scale_clip={}, warmup_val={}, overlap_memory={}, overlap_blend={}".format(
+            "Online graph adaptation enabled: lr={}, scale_lr={}, global_lr={}, global_scale_lr={}, decay={}, error_decay={}, topk={}, sensitivity={}, neighbor_expand={}, bias_clip={}, scale_clip={}, horizon_lr_start={}, horizon_lr_end={}, warmup_val={}, overlap_memory={}, overlap_blend={}".format(
                 getattr(self.args, 'online_adapt_lr', 0.08),
                 getattr(self.args, 'online_scale_lr', 0.02),
+                getattr(self.args, 'online_global_adapt_lr', 0.0),
+                getattr(self.args, 'online_global_scale_lr', 0.0),
                 getattr(self.args, 'online_adapt_decay', 0.95),
                 getattr(self.args, 'online_error_decay', 0.90),
                 getattr(self.args, 'online_graph_topk', 8),
@@ -464,6 +636,8 @@ class Trainer(object):
                 getattr(self.args, 'online_neighbor_expand', 0.35),
                 getattr(self.args, 'online_bias_clip', 8.0),
                 getattr(self.args, 'online_scale_clip', 0.08),
+                getattr(self.args, 'online_horizon_lr_start', 1.0),
+                getattr(self.args, 'online_horizon_lr_end', 1.0),
                 getattr(self.args, 'online_warmup_val', True),
                 getattr(self.args, 'online_overlap_memory', False),
                 getattr(self.args, 'online_overlap_blend', 0.85)
@@ -475,26 +649,47 @@ class Trainer(object):
         if online_adapter is None or self.val_loader is None or not getattr(self.args, 'online_warmup_val', True):
             return
         self.model.eval()
+        residuals = []
         with torch.no_grad():
             for data, target in self.val_loader:
                 label = target[..., :self.args.output_dim]
                 pred = self.scaler.inverse_transform(self.model(data, target))
                 true = self.scaler.inverse_transform(label)
-                online_adapter.adapt_batch(pred, true)
+                adapted = online_adapter.adapt_batch(pred, true)
+                residuals.append((true - adapted).detach().cpu())
         self._log_online_adapter_summary("Online adaptation warmup", online_adapter)
+        self._fit_online_val_bias_correction(online_adapter, residuals)
+        online_adapter.reset_overlap_state()
 
     def _warmup_online_adapter_ensemble(self, online_adapter, teacher, weights, periodic_weights=None, calibration=None):
         if online_adapter is None or self.val_loader is None or not getattr(self.args, 'online_warmup_val', True):
             return
         self.model.eval()
         teacher.eval()
+        residuals = []
         with torch.no_grad():
             for data, target in self.val_loader:
                 pred, true = self._ensemble_real_batch(
                     data, target, teacher, weights, periodic_weights=periodic_weights, calibration=calibration
                 )
-                online_adapter.adapt_batch(pred, true)
+                adapted = online_adapter.adapt_batch(pred, true)
+                residuals.append((true - adapted).detach().cpu())
         self._log_online_adapter_summary("Online adaptation warmup", online_adapter)
+        self._fit_online_val_bias_correction(online_adapter, residuals)
+        online_adapter.reset_overlap_state()
+
+    def _fit_online_val_bias_correction(self, online_adapter, residuals):
+        if online_adapter is None or not getattr(self.args, 'online_val_bias_correction', False) or not residuals:
+            return
+        residual_mean = torch.cat(residuals, dim=0).mean(dim=0)
+        online_adapter.set_post_bias(residual_mean)
+        self.logger.info(
+            "Online validation bias correction: shrink={}, |post_bias| mean/max={:.4f}/{:.4f}".format(
+                getattr(self.args, 'online_val_bias_shrink', 0.35),
+                float(online_adapter.post_bias.abs().mean().detach().cpu().item()),
+                float(online_adapter.post_bias.abs().max().detach().cpu().item())
+            )
+        )
 
     def _ensemble_real_batch(self, data, target, teacher, weights, periodic_weights=None, calibration=None):
         label = target[..., :self.args.output_dim]
@@ -567,6 +762,7 @@ class Trainer(object):
             'use_meta_reliable_graph',
             'use_periodic_consistency',
             'use_decoder_periodic_context',
+            'use_reliable_invariant_learning',
         ):
             setattr(teacher_args, flag, False)
         teacher = PDG2Seq(teacher_args).to(self.args.device)
@@ -804,10 +1000,13 @@ class Trainer(object):
         mae, rmse, mape, _, _ = All_Metrics(pred, true, args.mae_thresh, args.mape_thresh)
         return float(mae), float(rmse), float(mape)
 
-    @staticmethod
-    def _calibration_selection_score(metrics):
+    def _calibration_selection_score(self, metrics):
         mae, rmse, mape = metrics
-        return rmse + mae + 120.0 * mape
+        return (
+            float(getattr(self.args, 'eval_calibration_rmse_weight', 1.0)) * rmse
+            + float(getattr(self.args, 'eval_calibration_mae_weight', 1.0)) * mae
+            + float(getattr(self.args, 'eval_calibration_mape_weight', 120.0)) * mape
+        )
 
     def _select_eval_calibration(self, teacher, dgq_weights, periodic_weights=None):
         features, y_true, feature_names = self._collect_ensemble_features(

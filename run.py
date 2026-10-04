@@ -43,6 +43,17 @@ def optional_float(value):
         return None
     return float(value)
 
+
+def optional_float_list(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    text = str(value).strip()
+    if text.lower() == 'none' or text == '':
+        return None
+    return [float(v.strip()) for v in text.split(',') if v.strip()]
+
 from lib.metrics import MAE_torch
 def masked_mae_loss(scaler, mask_value):
     def loss(preds, labels):
@@ -152,9 +163,15 @@ args.add_argument('--periodic_consistency_eval', default=True, type=str_to_bool)
 args.add_argument('--use_decoder_periodic_context', default=False, type=str_to_bool)
 args.add_argument('--use_eval_calibration', default=True, type=str_to_bool)
 args.add_argument('--eval_calibration_ridge', default=1.0e-3, type=float)
+args.add_argument('--eval_calibration_ridge_grid', default=None, type=optional_float_list)
+args.add_argument('--eval_calibration_rmse_weight', default=1.0, type=float)
+args.add_argument('--eval_calibration_mae_weight', default=1.0, type=float)
+args.add_argument('--eval_calibration_mape_weight', default=120.0, type=float)
 args.add_argument('--use_online_adaptation', default=False, type=str_to_bool)
 args.add_argument('--online_adapt_lr', default=0.08, type=float)
 args.add_argument('--online_scale_lr', default=0.02, type=float)
+args.add_argument('--online_global_adapt_lr', default=0.0, type=float)
+args.add_argument('--online_global_scale_lr', default=0.0, type=float)
 args.add_argument('--online_adapt_decay', default=0.95, type=float)
 args.add_argument('--online_error_decay', default=0.90, type=float)
 args.add_argument('--online_drift_sensitivity', default=1.0, type=float)
@@ -165,6 +182,23 @@ args.add_argument('--online_scale_clip', default=0.08, type=float)
 args.add_argument('--online_warmup_val', default=True, type=str_to_bool)
 args.add_argument('--online_overlap_memory', default=False, type=str_to_bool)
 args.add_argument('--online_overlap_blend', default=0.85, type=float)
+args.add_argument('--online_val_bias_correction', default=False, type=str_to_bool)
+args.add_argument('--online_val_bias_shrink', default=0.35, type=float)
+args.add_argument('--online_horizon_lr_start', default=1.0, type=float)
+args.add_argument('--online_horizon_lr_end', default=1.0, type=float)
+args.add_argument('--use_reliable_invariant_learning', default=False, type=str_to_bool)
+args.add_argument('--invariant_repr_dim', default=64, type=int)
+args.add_argument('--env_repr_dim', default=64, type=int)
+args.add_argument('--invariant_loss_weight', default=0.10, type=float)
+args.add_argument('--env_pred_loss_weight', default=0.50, type=float)
+args.add_argument('--env_orth_loss_weight', default=0.01, type=float)
+args.add_argument('--invariant_reliable_topk', default=8, type=int)
+args.add_argument('--env_perturb_node_prob', default=0.35, type=float)
+args.add_argument('--env_perturb_scale', default=0.20, type=float)
+args.add_argument('--env_perturb_bias', default=0.15, type=float)
+args.add_argument('--env_perturb_noise', default=0.03, type=float)
+args.add_argument('--env_perturb_mask_prob', default=0.05, type=float)
+args.add_argument('--env_perturb_periodic_shift_prob', default=0.20, type=float)
 #train
 args.add_argument('--loss_func', default=config['train']['loss_func'], type=str)
 args.add_argument('--mape_loss_weight', default=0.05, type=float)
@@ -228,8 +262,17 @@ if args.mode == 'train' and args.train_init_path:
     state = torch.load(args.train_init_path, map_location=args.device)
     if isinstance(state, dict) and 'state_dict' in state:
         state = state['state_dict']
-    model.load_state_dict(state)
-    print("Initialize training model from {}".format(args.train_init_path))
+    if args.use_reliable_invariant_learning:
+        incompatible = model.load_state_dict(state, strict=False)
+        print(
+            "Initialize training model from {} with new invariant modules randomly initialized; "
+            "missing keys: {}, unexpected keys: {}".format(
+                args.train_init_path, len(incompatible.missing_keys), len(incompatible.unexpected_keys)
+            )
+        )
+    else:
+        model.load_state_dict(state)
+        print("Initialize training model from {}".format(args.train_init_path))
 print_model_parameters(model, only_num=False)
 
 #load dataset
@@ -301,6 +344,8 @@ def build_innovation_name(args):
         names.append('PeriodicConsistency')
     if args.use_online_adaptation:
         names.append('OnlineGraphAdapt')
+    if args.use_reliable_invariant_learning:
+        names.append('ReliableInvariant')
     if not names:
         names.append('Baseline')
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(names))

@@ -141,6 +141,7 @@ class PDG2SeqCell(nn.Module):
         self._context_debug_count = 0
         self._meta_debug_count = 0
         self._decouple_debug_count = 0
+        self.latest_reliable_graph = None
 
     def forward(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         state = state.to(x.device)
@@ -349,6 +350,7 @@ class PDG2SeqCell(nn.Module):
         stable_out = self._normalize_graph(adj_out * torch.clamp(stable_rel, min=self.meta_noise_floor))
         anomaly_in = self._normalize_graph(adj_in * torch.clamp(anomaly_rel, min=self.meta_noise_floor * 0.5))
         anomaly_out = self._normalize_graph(adj_out * torch.clamp(anomaly_rel, min=self.meta_noise_floor * 0.5))
+        self.latest_reliable_graph = torch.nan_to_num(stable_rel.detach().mean(dim=0), nan=0.0, posinf=1.0, neginf=0.0)
         return stable_in, stable_out, anomaly_in, anomaly_out, (stable_rel, anomaly_rel, noise_rel)
 
     def _mode_graph(self, src, dst):
@@ -386,6 +388,10 @@ class PDG2SeqCell(nn.Module):
             q_in_final, q_out_final = self._apply_context_refine(
                 q_in_dgq, q_out_dgq, x, periodic_context, context_valid
             )
+        self.latest_reliable_graph = torch.nan_to_num(
+            0.5 * (q_in_final.detach().mean(dim=0) + q_out_final.detach().mean(dim=0)),
+            nan=0.5, posinf=1.0, neginf=0.0
+        )
 
         refined_in = self._apply_residual_gate(adj_in, q_in_final)
         refined_out = self._apply_residual_gate(adj_out, q_out_final)
