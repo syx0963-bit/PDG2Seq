@@ -67,7 +67,12 @@ args.add_argument('--device', default='cuda:0', type=str, help='indices of GPUs'
 args.add_argument('--debug', default=False, type=str_to_bool)
 args.add_argument('--model', default='PDG2Seq', type=str)
 args.add_argument('--cuda', default=True, type=str_to_bool)
+args.add_argument('--use_long_short_learning', default=False, type=str_to_bool)
 args1, _ = args.parse_known_args()
+if args1.use_long_short_learning:
+    from tools.train_long_short import main as train_long_short
+    train_long_short(sys.argv[1:])
+    sys.exit(0)
 
 #get configuration
 config_file = './config_file/{}_{}.conf'.format(args1.dataset, args1.model)

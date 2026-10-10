@@ -1,0 +1,256 @@
+/root
+
+libgomp: Invalid value for environment variable OMP_NUM_THREADS
+Namespace(dataset='PEMSD4', mode='test', device='cuda:0', debug=False, model='PDG2Seq', cuda=True, val_ratio=0.2, test_ratio=0.2, lag=12, horizon=12, num_nodes=307, tod=False, normalizer='std', column_wise=False, default_graph=True, steps_per_day=288, steps_per_week=7, input_dim=1, output_dim=1, time_dim=16, embed_dim=8, rnn_units=64, num_layers=1, cheb_k=1, use_day=True, use_week=True, use_dgq=False, dgq_alpha=0.1, dgq_dim=16, dgq_eval_ensemble=True, dgq_teacher_path='', use_periodic_context=False, use_context_graph_refine=False, context_graph_lambda=0.05, context_graph_dim=16, use_signal_decouple=False, signal_decouple_hidden=32, signal_diffusion_bias=1.8, signal_fuse_diffusion_bias=1.2, signal_inherent_scale=0.2, use_meta_reliable_graph=False, meta_auto_features=True, meta_state_dim=32, meta_graph_modes=4, meta_graph_alpha=0.65, meta_stable_lambda=0.8, meta_anomaly_lambda=0.7, meta_noise_floor=0.2, periodic_day_steps=288, periodic_week_steps=2016, context_temperature=1.0, use_periodic_consistency=False, periodic_consistency_eval=True, use_decoder_periodic_context=False, use_eval_calibration=True, eval_calibration_ridge=0.001, use_online_adaptation=False, online_adapt_lr=0.08, online_scale_lr=0.02, online_adapt_decay=0.95, online_error_decay=0.9, online_drift_sensitivity=1.0, online_graph_topk=8, online_neighbor_expand=0.35, online_bias_clip=8.0, online_scale_clip=0.08, online_warmup_val=True, online_overlap_memory=False, online_overlap_blend=0.85, loss_func='mae', mape_loss_weight=0.05, rmse_loss_weight=0.25, seed=10, batch_size=32, epochs=200, lr_init=0.003, weight_decay=0.0, lr_decay=True, lr_decay_rate=0.3, lr_decay_step=1500.0, lr_decay_step1='60,75,90,120', early_stop=True, early_stop_patience=30, grad_norm=False, max_grad_norm=5, save_every=0, select_metric='balanced', train_init_path='', teacher_forcing=False, real_value=True, mae_thresh=None, mape_thresh=0.0, test_model_path='', log_dir='./', root_log_dir='logs', log_step=10000, plot=False)
+*****************Model Parameter*****************
+node_embeddings1 torch.Size([307, 8]) True
+T_i_D_emb1 torch.Size([288, 16]) True
+D_i_W_emb1 torch.Size([7, 16]) True
+T_i_D_emb2 torch.Size([288, 16]) True
+D_i_W_emb2 torch.Size([7, 16]) True
+encoder.PDG2Seq_cells.0.gate.weights_pool torch.Size([8, 3, 65, 128]) True
+encoder.PDG2Seq_cells.0.gate.weights torch.Size([3, 65, 128]) True
+encoder.PDG2Seq_cells.0.gate.bias_pool torch.Size([8, 128]) True
+encoder.PDG2Seq_cells.0.gate.bias torch.Size([128]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.weights_pool torch.Size([8, 3, 65, 64]) True
+encoder.PDG2Seq_cells.0.update.weights torch.Size([3, 65, 64]) True
+encoder.PDG2Seq_cells.0.update.bias_pool torch.Size([8, 64]) True
+encoder.PDG2Seq_cells.0.update.bias torch.Size([64]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.weights_pool torch.Size([8, 3, 65, 128]) True
+decoder.PDG2Seq_cells.0.gate.weights torch.Size([3, 65, 128]) True
+decoder.PDG2Seq_cells.0.gate.bias_pool torch.Size([8, 128]) True
+decoder.PDG2Seq_cells.0.gate.bias torch.Size([128]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.weights_pool torch.Size([8, 3, 65, 64]) True
+decoder.PDG2Seq_cells.0.update.weights torch.Size([3, 65, 64]) True
+decoder.PDG2Seq_cells.0.update.bias_pool torch.Size([8, 64]) True
+decoder.PDG2Seq_cells.0.update.bias torch.Size([64]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc3.bias torch.Size([16]) True
+proj.0.weight torch.Size([1, 64]) True
+proj.0.bias torch.Size([1]) True
+end_conv.weight torch.Size([12, 1, 1, 64]) True
+end_conv.bias torch.Size([12]) True
+Total params num: 703773
+*****************Finish Parameter****************
+Load PEMSD4 Dataset shaped:  (16992, 307, 1) 919.0 0.0 211.7007794815878 180.0
+Normalize the dataset by Standard Normalization
+Train:  (10182, 12, 307, 3) (10182, 12, 307, 3)
+Val:  (3394, 12, 307, 3) (3394, 12, 307, 3)
+Test:  (3393, 12, 307, 3) (3393, 12, 307, 3)
+Applying learning rate decay.
+Create Log File in:  /root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194349.log
+2026-08-16 19:43: Namespace(dataset='PEMSD4', mode='test', device='cuda:0', debug=False, model='PDG2Seq', cuda=True, val_ratio=0.2, test_ratio=0.2, lag=12, horizon=12, num_nodes=307, tod=False, normalizer='std', column_wise=False, default_graph=True, steps_per_day=288, steps_per_week=7, input_dim=1, output_dim=1, time_dim=16, embed_dim=8, rnn_units=64, num_layers=1, cheb_k=1, use_day=True, use_week=True, use_dgq=False, dgq_alpha=0.1, dgq_dim=16, dgq_eval_ensemble=True, dgq_teacher_path='', use_periodic_context=False, use_context_graph_refine=False, context_graph_lambda=0.05, context_graph_dim=16, use_signal_decouple=False, signal_decouple_hidden=32, signal_diffusion_bias=1.8, signal_fuse_diffusion_bias=1.2, signal_inherent_scale=0.2, use_meta_reliable_graph=False, meta_auto_features=True, meta_state_dim=32, meta_graph_modes=4, meta_graph_alpha=0.65, meta_stable_lambda=0.8, meta_anomaly_lambda=0.7, meta_noise_floor=0.2, periodic_day_steps=288, periodic_week_steps=2016, context_temperature=1.0, use_periodic_consistency=False, periodic_consistency_eval=True, use_decoder_periodic_context=False, use_eval_calibration=True, eval_calibration_ridge=0.001, use_online_adaptation=False, online_adapt_lr=0.08, online_scale_lr=0.02, online_adapt_decay=0.95, online_error_decay=0.9, online_drift_sensitivity=1.0, online_graph_topk=8, online_neighbor_expand=0.35, online_bias_clip=8.0, online_scale_clip=0.08, online_warmup_val=True, online_overlap_memory=False, online_overlap_blend=0.85, loss_func='mae', mape_loss_weight=0.05, rmse_loss_weight=0.25, seed=10, batch_size=32, epochs=200, lr_init=0.003, weight_decay=0.0, lr_decay=True, lr_decay_rate=0.3, lr_decay_step=1500.0, lr_decay_step1='60,75,90,120', early_stop=True, early_stop_patience=30, grad_norm=False, max_grad_norm=5, save_every=0, select_metric='balanced', train_init_path='', teacher_forcing=False, real_value=True, mae_thresh=None, mape_thresh=0.0, test_model_path='', log_dir='/root/PDG2Seq/experiments/PEMSD4/newinnovation-1-2-3_Baseline_20260816194349', root_log_dir='logs', log_step=10000, plot=False, root_log_file='/root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194349.log')
+2026-08-16 19:43: Experiment log path in: /root/PDG2Seq/experiments/PEMSD4/newinnovation-1-2-3_Baseline_20260816194349
+2026-08-16 19:43: Persistent epoch log path in: /root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194349.log
+Load saved model from ./pre-trained/PEMSD4.pth
+2026-08-16 19:43: Horizon 01, RMSE: 27.3960, MAE: 16.5953, MAPE: 11.1956%
+2026-08-16 19:43: Horizon 02, RMSE: 28.3720, MAE: 17.0691, MAPE: 11.4988%
+2026-08-16 19:43: Horizon 03, RMSE: 29.0836, MAE: 17.4502, MAPE: 11.7262%
+2026-08-16 19:43: Horizon 04, RMSE: 29.6307, MAE: 17.7482, MAPE: 11.8923%
+2026-08-16 19:43: Horizon 05, RMSE: 30.1036, MAE: 18.0053, MAPE: 12.0318%
+2026-08-16 19:43: Horizon 06, RMSE: 30.4821, MAE: 18.2200, MAPE: 12.1555%
+2026-08-16 19:43: Horizon 07, RMSE: 30.8261, MAE: 18.4191, MAPE: 12.2928%
+2026-08-16 19:43: Horizon 08, RMSE: 31.1533, MAE: 18.6136, MAPE: 12.4027%
+2026-08-16 19:43: Horizon 09, RMSE: 31.4768, MAE: 18.8107, MAPE: 12.5077%
+2026-08-16 19:43: Horizon 10, RMSE: 31.7917, MAE: 19.0094, MAPE: 12.6218%
+2026-08-16 19:43: Horizon 11, RMSE: 32.1196, MAE: 19.2192, MAPE: 12.7462%
+2026-08-16 19:43: Horizon 12, RMSE: 32.4782, MAE: 19.4495, MAPE: 12.8928%
+2026-08-16 19:43: test1 Average Horizon, RMSE: 30.4460, MAE: 18.2175, MAPE: 12.1637%
+/root
+
+libgomp: Invalid value for environment variable OMP_NUM_THREADS
+Namespace(dataset='PEMSD4', mode='test', device='cuda:0', debug=False, model='PDG2Seq', cuda=True, val_ratio=0.2, test_ratio=0.2, lag=12, horizon=12, num_nodes=307, tod=False, normalizer='std', column_wise=False, default_graph=True, steps_per_day=288, steps_per_week=7, input_dim=1, output_dim=1, time_dim=16, embed_dim=8, rnn_units=64, num_layers=1, cheb_k=1, use_day=True, use_week=True, use_dgq=False, dgq_alpha=0.1, dgq_dim=16, dgq_eval_ensemble=True, dgq_teacher_path='', use_periodic_context=False, use_context_graph_refine=False, context_graph_lambda=0.05, context_graph_dim=16, use_signal_decouple=False, signal_decouple_hidden=32, signal_diffusion_bias=1.8, signal_fuse_diffusion_bias=1.2, signal_inherent_scale=0.2, use_meta_reliable_graph=False, meta_auto_features=True, meta_state_dim=32, meta_graph_modes=4, meta_graph_alpha=0.65, meta_stable_lambda=0.8, meta_anomaly_lambda=0.7, meta_noise_floor=0.2, periodic_day_steps=288, periodic_week_steps=2016, context_temperature=1.0, use_periodic_consistency=False, periodic_consistency_eval=True, use_decoder_periodic_context=False, use_eval_calibration=True, eval_calibration_ridge=0.001, use_online_adaptation=False, online_adapt_lr=0.08, online_scale_lr=0.02, online_adapt_decay=0.95, online_error_decay=0.9, online_drift_sensitivity=1.0, online_graph_topk=8, online_neighbor_expand=0.35, online_bias_clip=8.0, online_scale_clip=0.08, online_warmup_val=True, online_overlap_memory=False, online_overlap_blend=0.85, loss_func='mae', mape_loss_weight=0.05, rmse_loss_weight=0.25, seed=10, batch_size=64, epochs=200, lr_init=0.003, weight_decay=0.0, lr_decay=True, lr_decay_rate=0.3, lr_decay_step=1500.0, lr_decay_step1='60,75,90,120', early_stop=True, early_stop_patience=30, grad_norm=False, max_grad_norm=5, save_every=0, select_metric='balanced', train_init_path='', teacher_forcing=False, real_value=True, mae_thresh=None, mape_thresh=0.0, test_model_path='', log_dir='./', root_log_dir='logs', log_step=10000, plot=False)
+*****************Model Parameter*****************
+node_embeddings1 torch.Size([307, 8]) True
+T_i_D_emb1 torch.Size([288, 16]) True
+D_i_W_emb1 torch.Size([7, 16]) True
+T_i_D_emb2 torch.Size([288, 16]) True
+D_i_W_emb2 torch.Size([7, 16]) True
+encoder.PDG2Seq_cells.0.gate.weights_pool torch.Size([8, 3, 65, 128]) True
+encoder.PDG2Seq_cells.0.gate.weights torch.Size([3, 65, 128]) True
+encoder.PDG2Seq_cells.0.gate.bias_pool torch.Size([8, 128]) True
+encoder.PDG2Seq_cells.0.gate.bias torch.Size([128]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.weights_pool torch.Size([8, 3, 65, 64]) True
+encoder.PDG2Seq_cells.0.update.weights torch.Size([3, 65, 64]) True
+encoder.PDG2Seq_cells.0.update.bias_pool torch.Size([8, 64]) True
+encoder.PDG2Seq_cells.0.update.bias torch.Size([64]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.fc1.mlp.fc3.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc1.bias torch.Size([16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc2.bias torch.Size([2]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+encoder.PDG2Seq_cells.0.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.weights_pool torch.Size([8, 3, 65, 128]) True
+decoder.PDG2Seq_cells.0.gate.weights torch.Size([3, 65, 128]) True
+decoder.PDG2Seq_cells.0.gate.bias_pool torch.Size([8, 128]) True
+decoder.PDG2Seq_cells.0.gate.bias torch.Size([128]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.gate.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.gate.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.weights_pool torch.Size([8, 3, 65, 64]) True
+decoder.PDG2Seq_cells.0.update.weights torch.Size([3, 65, 64]) True
+decoder.PDG2Seq_cells.0.update.bias_pool torch.Size([8, 64]) True
+decoder.PDG2Seq_cells.0.update.bias torch.Size([64]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.update.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.update.fc2.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.fc1.mlp.fc3.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc1.weight torch.Size([16, 65]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc1.bias torch.Size([16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc2.weight torch.Size([2, 16]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc2.bias torch.Size([2]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc3.weight torch.Size([16, 2]) True
+decoder.PDG2Seq_cells.0.fc2.mlp.fc3.bias torch.Size([16]) True
+proj.0.weight torch.Size([1, 64]) True
+proj.0.bias torch.Size([1]) True
+end_conv.weight torch.Size([12, 1, 1, 64]) True
+end_conv.bias torch.Size([12]) True
+Total params num: 703773
+*****************Finish Parameter****************
+Load PEMSD4 Dataset shaped:  (16992, 307, 1) 919.0 0.0 211.7007794815878 180.0
+Normalize the dataset by Standard Normalization
+Train:  (10182, 12, 307, 3) (10182, 12, 307, 3)
+Val:  (3394, 12, 307, 3) (3394, 12, 307, 3)
+Test:  (3393, 12, 307, 3) (3393, 12, 307, 3)
+Applying learning rate decay.
+Create Log File in:  /root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194534.log
+2026-08-16 19:45: Namespace(dataset='PEMSD4', mode='test', device='cuda:0', debug=False, model='PDG2Seq', cuda=True, val_ratio=0.2, test_ratio=0.2, lag=12, horizon=12, num_nodes=307, tod=False, normalizer='std', column_wise=False, default_graph=True, steps_per_day=288, steps_per_week=7, input_dim=1, output_dim=1, time_dim=16, embed_dim=8, rnn_units=64, num_layers=1, cheb_k=1, use_day=True, use_week=True, use_dgq=False, dgq_alpha=0.1, dgq_dim=16, dgq_eval_ensemble=True, dgq_teacher_path='', use_periodic_context=False, use_context_graph_refine=False, context_graph_lambda=0.05, context_graph_dim=16, use_signal_decouple=False, signal_decouple_hidden=32, signal_diffusion_bias=1.8, signal_fuse_diffusion_bias=1.2, signal_inherent_scale=0.2, use_meta_reliable_graph=False, meta_auto_features=True, meta_state_dim=32, meta_graph_modes=4, meta_graph_alpha=0.65, meta_stable_lambda=0.8, meta_anomaly_lambda=0.7, meta_noise_floor=0.2, periodic_day_steps=288, periodic_week_steps=2016, context_temperature=1.0, use_periodic_consistency=False, periodic_consistency_eval=True, use_decoder_periodic_context=False, use_eval_calibration=True, eval_calibration_ridge=0.001, use_online_adaptation=False, online_adapt_lr=0.08, online_scale_lr=0.02, online_adapt_decay=0.95, online_error_decay=0.9, online_drift_sensitivity=1.0, online_graph_topk=8, online_neighbor_expand=0.35, online_bias_clip=8.0, online_scale_clip=0.08, online_warmup_val=True, online_overlap_memory=False, online_overlap_blend=0.85, loss_func='mae', mape_loss_weight=0.05, rmse_loss_weight=0.25, seed=10, batch_size=64, epochs=200, lr_init=0.003, weight_decay=0.0, lr_decay=True, lr_decay_rate=0.3, lr_decay_step=1500.0, lr_decay_step1='60,75,90,120', early_stop=True, early_stop_patience=30, grad_norm=False, max_grad_norm=5, save_every=0, select_metric='balanced', train_init_path='', teacher_forcing=False, real_value=True, mae_thresh=None, mape_thresh=0.0, test_model_path='', log_dir='/root/PDG2Seq/experiments/PEMSD4/newinnovation-1-2-3_Baseline_20260816194534', root_log_dir='logs', log_step=10000, plot=False, root_log_file='/root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194534.log')
+2026-08-16 19:45: Experiment log path in: /root/PDG2Seq/experiments/PEMSD4/newinnovation-1-2-3_Baseline_20260816194534
+2026-08-16 19:45: Persistent epoch log path in: /root/PDG2Seq/logs/newinnovation-1-2-3_Baseline_20260816194534.log
+Load saved model from ./pre-trained/PEMSD4.pth
+2026-08-16 19:45: Horizon 01, RMSE: 27.3960, MAE: 16.5953, MAPE: 11.1956%
+2026-08-16 19:45: Horizon 02, RMSE: 28.3720, MAE: 17.0691, MAPE: 11.4988%
+2026-08-16 19:45: Horizon 03, RMSE: 29.0836, MAE: 17.4502, MAPE: 11.7262%
+2026-08-16 19:45: Horizon 04, RMSE: 29.6307, MAE: 17.7482, MAPE: 11.8923%
+2026-08-16 19:45: Horizon 05, RMSE: 30.1036, MAE: 18.0053, MAPE: 12.0318%
+2026-08-16 19:45: Horizon 06, RMSE: 30.4821, MAE: 18.2200, MAPE: 12.1555%
+2026-08-16 19:45: Horizon 07, RMSE: 30.8261, MAE: 18.4191, MAPE: 12.2928%
+2026-08-16 19:45: Horizon 08, RMSE: 31.1533, MAE: 18.6136, MAPE: 12.4027%
+2026-08-16 19:45: Horizon 09, RMSE: 31.4768, MAE: 18.8107, MAPE: 12.5077%
+2026-08-16 19:45: Horizon 10, RMSE: 31.7917, MAE: 19.0094, MAPE: 12.6218%
+2026-08-16 19:45: Horizon 11, RMSE: 32.1196, MAE: 19.2192, MAPE: 12.7462%
+2026-08-16 19:45: Horizon 12, RMSE: 32.4782, MAE: 19.4495, MAPE: 12.8928%
+2026-08-16 19:45: test1 Average Horizon, RMSE: 30.4460, MAE: 18.2175, MAPE: 12.1637%

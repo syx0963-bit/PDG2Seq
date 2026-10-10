@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from model.PDG2SeqCell import PDG2SeqCell
+from model.LongShortTemporal import LongHistoryMaskedEncoder, HorizonAdaptiveForecaster
 import numpy as np
 
 
@@ -93,6 +94,7 @@ class PDG2Seq(nn.Module):
         self.steps_per_day = args.steps_per_day
         self.steps_per_week = args.steps_per_week
         self.cl_decay_steps = args.lr_decay_step
+        self.use_long_short_learning = getattr(args, 'use_long_short_learning', False)
         self.node_embeddings1 = nn.Parameter(torch.empty(self.num_node, args.embed_dim))
         self.T_i_D_emb1 = nn.Parameter(torch.empty(self.steps_per_day, args.time_dim))
         self.D_i_W_emb1 = nn.Parameter(torch.empty(self.steps_per_week, args.time_dim))
@@ -109,8 +111,52 @@ class PDG2Seq(nn.Module):
         )
         self.proj = nn.Sequential(nn.Linear(self.hidden_dim, self.output_dim, bias=True))
         self.end_conv = nn.Conv2d(1, args.horizon * self.output_dim, kernel_size=(1, self.hidden_dim), bias=True)
+        if self.use_long_short_learning:
+            if self.input_dim != 1 or self.output_dim != 1:
+                raise ValueError('Long/short traffic learning currently supports one flow channel')
+            prior_width = int(getattr(args, 'long_prior_width', 48))
+            self.long_history_encoder = LongHistoryMaskedEncoder(
+                self.num_node, int(getattr(args, 'long_history_steps', 2016)),
+                int(getattr(args, 'long_patch_size', 12)), prior_width,
+                int(getattr(args, 'long_prior_layers', 2)), float(getattr(args, 'long_dropout', 0.1)),
+                self.steps_per_day)
+            self.horizon_forecaster = HorizonAdaptiveForecaster(self.num_node, int(args.lag),
+                self.horizon, self.hidden_dim, prior_width,
+                int(getattr(args, 'long_forecast_width', 96)), float(getattr(args, 'long_dropout', 0.1)),
+                int(getattr(args, 'long_short_attention_layers', 0)),
+                bool(getattr(args, 'long_phase_memory', False)))
 
-    def forward(self, source, traget=None, batches_seen=None):
+    def encode_short(self, source):
+        """Reuse the existing DGQ/context/signal-decoupled graph encoder."""
+        time_index = (source[..., 0, -2]*self.steps_per_day).long().clamp(0, self.steps_per_day-1)
+        first, second = self.T_i_D_emb1[time_index], self.T_i_D_emb2[time_index]
+        if self.use_W:
+            week_index = source[..., 0, -1].long().clamp(0, self.steps_per_week-1)
+            first = first*self.D_i_W_emb1[week_index]
+            second = second*self.D_i_W_emb2[week_index]
+        periodic = source[..., 1:2] if self.use_periodic_graph_context else None
+        valid = source[..., 2:3] if self.use_periodic_graph_context else None
+        state, _ = self.encoder(source[..., 0:1],
+            self.encoder.init_hidden(source.shape[0]).to(source.device),
+            [first, second, self.node_embeddings1], periodic_context=periodic, context_valid=valid)
+        return state[:, -1]
+
+    def forward(self, source, traget=None, batches_seen=None, *, long_history=None,
+                history_start=None, history_available=None, long_prior=None,
+                periodic_features=None, short_state=None, return_gates=False):
+        if self.use_long_short_learning:
+            if short_state is None:
+                short_state = self.encode_short(source)
+            if long_prior is None:
+                if long_history is None or history_start is None:
+                    raise ValueError('Supply past long history or an origin-aligned frozen prior')
+                long_prior = self.long_history_encoder(long_history, history_start, history_available,
+                    phase_memory=self.horizon_forecaster.phase_memory)
+            if periodic_features is None:
+                raise ValueError('Past day/week references and validity flags are required')
+            return self.horizon_forecaster(source[..., 0], short_state, long_prior,
+                                            periodic_features, return_gates=return_gates,
+                                            calendar=None if traget is None else traget[..., 0, -2:])
         t_i_d_data1 = source[..., 0, -2]
         t_i_d_data2 = traget[..., 0, -2]
         t_i_d_idx1 = torch.clamp((t_i_d_data1 * self.steps_per_day).long(), 0, self.steps_per_day - 1).to(source.device)
