@@ -40,6 +40,9 @@ class PDG2SeqCell(nn.Module):
         self.context_graph_lambda = getattr(args, 'context_graph_lambda', 0.05) if args is not None else 0.05
         self.context_graph_dim = getattr(args, 'context_graph_dim', 16) if args is not None else 16
         self.use_signal_decouple = getattr(args, 'use_signal_decouple', False) if args is not None else False
+        self.use_periodic_edge_quality = getattr(args, 'use_periodic_edge_quality', False)
+        self.use_periodic_residual_decouple = getattr(args, 'use_periodic_residual_decouple', False)
+        self.use_graph_quality_decouple = getattr(args, 'use_graph_quality_decouple', False)
         self.signal_decouple_hidden = getattr(args, 'signal_decouple_hidden', 32) if args is not None else 32
         self.signal_diffusion_bias = getattr(args, 'signal_diffusion_bias', 1.5) if args is not None else 1.5
         self.signal_fuse_diffusion_bias = getattr(args, 'signal_fuse_diffusion_bias', 1.0) if args is not None else 1.0
@@ -95,7 +98,7 @@ class PDG2SeqCell(nn.Module):
 
     def forward(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         state = state.to(x.device)
-        if self.use_signal_decouple:
+        if self.use_signal_decouple and not self.use_graph_quality_decouple:
             x_diff, x_inh, time_context, static_embedding = self._decouple_signal(
                 x, state, node_embeddings, periodic_context, context_valid
             )
@@ -118,9 +121,16 @@ class PDG2SeqCell(nn.Module):
         adj_in = PDG2SeqCell.preprocessing(F.relu(adj))
         adj_out = PDG2SeqCell.preprocessing(F.relu(-adj.transpose(-2, -1)))
 
-        adj_in, adj_out = self._maybe_refine_adjs(
-            adj_in, adj_out, input_and_state, x, periodic_context=periodic_context, context_valid=context_valid
+        refined = self._maybe_refine_adjs(
+            adj_in, adj_out, input_and_state, x, periodic_context=periodic_context, context_valid=context_valid,
+            return_quality=self.use_graph_quality_decouple
         )
+        adj_in, adj_out = refined[:2]
+        if self.use_graph_quality_decouple:
+            x_diff, x_inh, time_context, static_embedding = self._decouple_signal(
+                x, state, node_embeddings, periodic_context, context_valid, graph_quality=refined[2]
+            )
+            input_and_state = torch.cat((x_diff, state), dim=-1)
         adj = [adj_in, adj_out]
 
         z_r = torch.sigmoid(self.gate(input_and_state, adj, node_embeddings[2]))
@@ -138,7 +148,7 @@ class PDG2SeqCell(nn.Module):
         h = h_diff + self.signal_inherent_scale * (1.0 - fuse_gate) * (h_inh - h_diff)
         return h
 
-    def _decouple_signal(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
+    def _decouple_signal(self, x, state, node_embeddings, periodic_context=None, context_valid=None, graph_quality=None):
         batch_size = x.shape[0]
         time_context = 0.5 * (node_embeddings[0] + node_embeddings[1])
         if time_context.dim() == 2:
@@ -158,8 +168,15 @@ class PDG2SeqCell(nn.Module):
             dim=-1
         )
         diffusion_gate = torch.sigmoid(self.signal_gate(gate_input))
+        if graph_quality is not None:
+            diffusion_gate = diffusion_gate * graph_quality
         x_diff = diffusion_gate * x
         x_inh = (1.0 - diffusion_gate) * x
+        if self.use_periodic_residual_decouple:
+            # Preserve x_diff + x_inh == x; missing context recovers the original split.
+            anchor = periodic_signal * context_flag
+            x_diff = diffusion_gate * (x - anchor)
+            x_inh = x - x_diff
 
         if self._decouple_debug_count < 3:
             print(
@@ -178,8 +195,10 @@ class PDG2SeqCell(nn.Module):
         h_inh = self.inherent_gru(x_flat, state_flat)
         return h_inh.view(batch_size, node_num, self.hidden_dim)
 
-    def _maybe_refine_adjs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None):
+    def _maybe_refine_adjs(self, adj_in, adj_out, signal, x, periodic_context=None, context_valid=None, return_quality=False):
         if not self.use_dgq and not self.use_context_graph_refine:
+            if return_quality:
+                return adj_in, adj_out, torch.ones_like(x[..., :1])
             return adj_in, adj_out
 
         if self.use_dgq:
@@ -215,6 +234,15 @@ class PDG2SeqCell(nn.Module):
             )
             self._dgq_debug_count += 1
 
+        if return_quality:
+            # Aggregate edge reliability over non-self neighbors; self-loops do
+            # not provide evidence for spatial propagation to other nodes.
+            mask = 1.0 - torch.eye(self.node_num, device=x.device, dtype=x.dtype)
+            mass = (adj_in * mask).sum(-1, keepdim=True) + (adj_out * mask).sum(-1, keepdim=True)
+            score = (adj_in * mask * q_in_final).sum(-1, keepdim=True)
+            score = score + (adj_out * mask * q_out_final).sum(-1, keepdim=True)
+            node_quality = score / mass.clamp_min(1.0e-8)
+            return refined_in, refined_out, node_quality.clamp(0.0, 1.0)
         return refined_in, refined_out
 
     def _compute_dgq_quality(self, signal, src_proj, dst_proj):
@@ -230,6 +258,19 @@ class PDG2SeqCell(nn.Module):
         r = torch.sum(cur_emb * ctx_emb, dim=-1)
         r = torch.clamp((r + 1.0) / 2.0, 0.0, 1.0)
         reliability = (r.unsqueeze(-1) + r.unsqueeze(-2)) / 2.0
+
+        if self.use_periodic_edge_quality:
+            # Compare edge relations, rather than averaging only endpoint scores.
+            current_relation = torch.matmul(cur_emb, cur_emb.transpose(-1, -2))
+            periodic_relation = torch.matmul(ctx_emb, ctx_emb.transpose(-1, -2))
+            relation_agreement = (1.0 - 0.5 * (current_relation - periodic_relation).abs()).clamp(0.0, 1.0)
+            # A coherent deviation across two nodes is more reliable than an isolated one.
+            deviation = x - periodic_context
+            deviation_gap = (deviation.unsqueeze(-2) - deviation.unsqueeze(-3)).abs().mean(-1)
+            deviation_scale = x.abs().mean(-1) + periodic_context.abs().mean(-1) + 1.0
+            edge_scale = 0.5 * (deviation_scale.unsqueeze(-1) + deviation_scale.unsqueeze(-2))
+            deviation_agreement = torch.exp(-deviation_gap / edge_scale)
+            reliability = relation_agreement * deviation_agreement
 
         valid = context_valid.squeeze(-1)
         edge_valid = valid.unsqueeze(-1) * valid.unsqueeze(-2)

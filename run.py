@@ -108,6 +108,9 @@ args.add_argument('--use_context_graph_refine', default=False, type=str_to_bool)
 args.add_argument('--context_graph_lambda', default=0.05, type=float)
 args.add_argument('--context_graph_dim', default=16, type=int)
 args.add_argument('--use_signal_decouple', default=False, type=str_to_bool)
+args.add_argument('--use_periodic_edge_quality', default=False, type=str_to_bool)
+args.add_argument('--use_periodic_residual_decouple', default=False, type=str_to_bool)
+args.add_argument('--use_graph_quality_decouple', default=False, type=str_to_bool)
 args.add_argument('--signal_decouple_hidden', default=32, type=int)
 args.add_argument('--signal_diffusion_bias', default=1.5, type=float)
 args.add_argument('--signal_fuse_diffusion_bias', default=1.0, type=float)
@@ -146,6 +149,14 @@ args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
+if args.use_graph_quality_decouple and not (args.use_signal_decouple and args.use_dgq):
+    raise ValueError('Graph quality decoupling requires signal decoupling and DGQ')
+if args.use_periodic_edge_quality and not (args.use_periodic_context and args.use_context_graph_refine):
+    raise ValueError('Periodic edge quality requires periodic context and context graph refinement')
+if args.use_periodic_residual_decouple and not (
+        args.use_signal_decouple and args.use_periodic_context and args.use_context_graph_refine):
+    raise ValueError('Periodic residual decoupling requires signal decoupling and periodic graph context')
+
 if args.use_dgq and args.dgq_eval_ensemble and not args.dgq_teacher_path:
     args.dgq_teacher_path = './pre-trained/{}.pth'.format(args.dataset)
 
@@ -222,8 +233,14 @@ def build_innovation_name(args):
         names.append('PeriodicContext')
     if args.use_context_graph_refine:
         names.append('ContextGraphRefine')
+        if args.use_periodic_edge_quality:
+            names.append('PeriodicEdgeQuality')
     if args.use_signal_decouple:
         names.append('SignalDecouple')
+        if args.use_graph_quality_decouple:
+            names.append('GraphQualityDecouple')
+        if args.use_periodic_residual_decouple:
+            names.append('PeriodicResidualDecouple')
         if args.use_decoder_periodic_context:
             names.append('DecoderPeriodicContext')
     if args.use_periodic_consistency:
