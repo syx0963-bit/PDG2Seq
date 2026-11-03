@@ -111,6 +111,12 @@ args.add_argument('--use_signal_decouple', default=False, type=str_to_bool)
 args.add_argument('--use_periodic_edge_quality', default=False, type=str_to_bool)
 args.add_argument('--use_periodic_residual_decouple', default=False, type=str_to_bool)
 args.add_argument('--use_graph_quality_decouple', default=False, type=str_to_bool)
+args.add_argument('--graph_quality_strength', default=1.0, type=float)
+args.add_argument('--checkpoint', default='', type=str)
+args.add_argument('--init_checkpoint', default='', type=str)
+args.add_argument('--sampling_ratio', default=1.0, type=float)
+args.add_argument('--rmse_loss_weight', default=0.3, type=float)
+args.add_argument('--calibration_source', default='', type=str)
 args.add_argument('--signal_decouple_hidden', default=32, type=int)
 args.add_argument('--signal_diffusion_bias', default=1.5, type=float)
 args.add_argument('--signal_fuse_diffusion_bias', default=1.0, type=float)
@@ -149,6 +155,12 @@ args.add_argument('--root_log_dir', default='logs', type=str)
 args.add_argument('--log_step', default=config['log']['log_step'], type=int)
 args.add_argument('--plot', default=config['log']['plot'], type=str_to_bool)
 args = args.parse_args()
+if not 0.0 <= args.graph_quality_strength <= 1.0:
+    raise ValueError('graph_quality_strength must be between 0 and 1')
+if not 0.0 <= args.sampling_ratio <= 1.0:
+    raise ValueError('sampling_ratio must be between 0 and 1')
+if args.rmse_loss_weight < 0:
+    raise ValueError('rmse_loss_weight must be nonnegative')
 if args.use_graph_quality_decouple and not (args.use_signal_decouple and args.use_dgq):
     raise ValueError('Graph quality decoupling requires signal decoupling and DGQ')
 if args.use_periodic_edge_quality and not (args.use_periodic_context and args.use_context_graph_refine):
@@ -176,7 +188,13 @@ for p in model.parameters():
         nn.init.xavier_uniform_(p)
     else:
         nn.init.uniform_(p)
+for module in model.modules():
+    if hasattr(module, 'reset_signal_biases'):
+        module.reset_signal_biases()
 print_model_parameters(model, only_num=False)
+if args.init_checkpoint:
+    model.load_state_dict(torch.load(args.init_checkpoint, map_location=args.device))
+    print('Initialized model from:', args.init_checkpoint)
 
 #load dataset
 train_loader, val_loader, test_loader, scaler = get_dataloader(args,
@@ -191,6 +209,9 @@ elif args.loss_func == 'mae':
     loss = torch.nn.L1Loss().to(args.device)
 elif args.loss_func == 'mse':
     loss = torch.nn.MSELoss().to(args.device)
+elif args.loss_func == 'mae_rmse':
+    from lib.forecast_loss import MAERMSELoss
+    loss = MAERMSELoss(args.rmse_loss_weight).to(args.device)
 else:
     raise ValueError
 
@@ -264,8 +285,20 @@ trainer = Trainer(model, loss, optimizer, train_loader, val_loader, test_loader,
 if args.mode == 'train':
     trainer.train()
 elif args.mode == 'test':
-    model.load_state_dict(torch.load('./pre-trained/{}.pth'.format(args.dataset), map_location=args.device))
+    model.load_state_dict(torch.load(args.checkpoint or './pre-trained/{}.pth'.format(args.dataset), map_location=args.device))
     print("Load saved model")
     trainer.test(model, trainer.args, test_loader, scaler, trainer.logger)
+elif args.mode == 'enhanced_eval':
+    from lib.enhanced_eval import evaluate
+    if not args.checkpoint:
+        raise ValueError('enhanced_eval requires --checkpoint')
+    model.load_state_dict(torch.load(args.checkpoint, map_location=args.device))
+    evaluate(trainer)
+elif args.mode == 'calibrated_eval':
+    from lib.boosted_calibration import evaluate
+    if not args.checkpoint or not args.calibration_source:
+        raise ValueError('calibrated_eval requires checkpoint and calibration_source')
+    model.load_state_dict(torch.load(args.checkpoint, map_location=args.device))
+    evaluate(trainer)
 else:
     raise ValueError

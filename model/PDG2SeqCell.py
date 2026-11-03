@@ -43,6 +43,7 @@ class PDG2SeqCell(nn.Module):
         self.use_periodic_edge_quality = getattr(args, 'use_periodic_edge_quality', False)
         self.use_periodic_residual_decouple = getattr(args, 'use_periodic_residual_decouple', False)
         self.use_graph_quality_decouple = getattr(args, 'use_graph_quality_decouple', False)
+        self.graph_quality_strength = getattr(args, 'graph_quality_strength', 1.0)
         self.signal_decouple_hidden = getattr(args, 'signal_decouple_hidden', 32) if args is not None else 32
         self.signal_diffusion_bias = getattr(args, 'signal_diffusion_bias', 1.5) if args is not None else 1.5
         self.signal_fuse_diffusion_bias = getattr(args, 'signal_fuse_diffusion_bias', 1.0) if args is not None else 1.0
@@ -95,6 +96,12 @@ class PDG2SeqCell(nn.Module):
         self._dgq_debug_count = 0
         self._context_debug_count = 0
         self._decouple_debug_count = 0
+
+    def reset_signal_biases(self):
+        """Restore branch priors after the model-wide parameter initializer."""
+        if self.use_signal_decouple:
+            nn.init.constant_(self.signal_gate[-1].bias, self.signal_diffusion_bias)
+            nn.init.constant_(self.fuse_gate[-1].bias, self.signal_fuse_diffusion_bias)
 
     def forward(self, x, state, node_embeddings, periodic_context=None, context_valid=None):
         state = state.to(x.device)
@@ -169,7 +176,7 @@ class PDG2SeqCell(nn.Module):
         )
         diffusion_gate = torch.sigmoid(self.signal_gate(gate_input))
         if graph_quality is not None:
-            diffusion_gate = diffusion_gate * graph_quality
+            diffusion_gate = diffusion_gate * (1.0 - self.graph_quality_strength * (1.0 - graph_quality))
         x_diff = diffusion_gate * x
         x_inh = (1.0 - diffusion_gate) * x
         if self.use_periodic_residual_decouple:

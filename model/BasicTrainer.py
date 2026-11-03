@@ -329,6 +329,10 @@ class Trainer(object):
         teacher_args.use_periodic_context = False
         teacher_args.use_context_graph_refine = False
         teacher_args.use_signal_decouple = False
+        teacher_args.use_graph_quality_decouple = False
+        teacher_args.use_periodic_edge_quality = False
+        teacher_args.use_periodic_residual_decouple = False
+        teacher_args.use_decoder_periodic_context = False
         teacher = PDG2Seq(teacher_args).to(self.args.device)
         state = torch.load(teacher_path, map_location=self.args.device)
         if isinstance(state, dict) and 'state_dict' in state:

@@ -93,6 +93,7 @@ class PDG2Seq(nn.Module):
         self.steps_per_day = args.steps_per_day
         self.steps_per_week = args.steps_per_week
         self.cl_decay_steps = args.lr_decay_step
+        self.sampling_ratio = getattr(args, 'sampling_ratio', 1.0)
         self.node_embeddings1 = nn.Parameter(torch.empty(self.num_node, args.embed_dim))
         self.T_i_D_emb1 = nn.Parameter(torch.empty(self.steps_per_day, args.time_dim))
         self.D_i_W_emb1 = nn.Parameter(torch.empty(self.steps_per_week, args.time_dim))
@@ -185,7 +186,7 @@ class PDG2Seq(nn.Module):
             out.append(go)
             if self.training:
                 c = np.random.uniform(0, 1)
-                if c < self._compute_sampling_threshold(batches_seen):
+                if c < self.sampling_ratio * self._compute_sampling_threshold(batches_seen):
                     go = traget[:, t, :, 0].unsqueeze(-1)
         output = torch.stack(out, dim=1)
 
